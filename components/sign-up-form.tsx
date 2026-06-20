@@ -15,6 +15,7 @@ import { Label } from "@/components/ui/label";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { GoogleLoginButton } from "@/components/google-login-button";
 
 export function SignUpForm({
   className,
@@ -106,6 +107,15 @@ export function SignUpForm({
                 {isLoading ? "Creating an account..." : "Sign up"}
               </Button>
             </div>
+            <div className="relative my-4">
+              <div className="absolute inset-0 flex items-center">
+                <span className="w-full border-t" />
+              </div>
+              <div className="relative flex justify-center text-xs uppercase">
+                <span className="bg-card px-2 text-muted-foreground">or</span>
+              </div>
+            </div>
+            <GoogleLoginButton />
             <div className="mt-4 text-center text-sm">
               Already have an account?{" "}
               <Link href="/auth/login" className="underline underline-offset-4">
