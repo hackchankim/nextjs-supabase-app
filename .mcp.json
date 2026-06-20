@@ -1,0 +1,31 @@
+{
+  "mcpServers": {
+    "supabase": {
+      "type": "http",
+      "url": "https://mcp.supabase.com/mcp?project_ref=fzlvqsblguescmdmtzdc"
+    },
+    "playwright": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest"
+      ],
+      "env": {}
+    },
+    "context7": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp"
+    },
+    "shrimp-task-manager": {
+      "command": "node",
+      "args": [
+        "/Users/chelly/workspace/claude-inflearn/mcp-shrimp-task-manager/dist/index.js"
+      ],
+      "env": {
+        "DATA_DIR": "/Users/chelly/workspace/claude-inflearn/nextjs-supabase-app/shrimp_data",
+        "TEMPLATES_USE": "en",
+        "ENABLE_GUI": "true"
+      }
+    }
+  }
+}
