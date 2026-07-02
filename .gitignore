@@ -34,6 +34,9 @@ yarn-error.log*
 .env*.local
 .env
 
+# 자율 개발 에이전트 팀 카카오 시크릿 (명시적 방어선, .env*.local 로도 무시됨)
+.env.autodev.local
+
 # vercel
 .vercel
 
