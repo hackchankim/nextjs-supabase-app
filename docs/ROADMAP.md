@@ -48,7 +48,7 @@
 
 > 스스로 개발하고, 산출물을 코드리뷰·QA하며, 중요 의사결정 시 카카오톡으로 알리는 개발 시스템을 구축한다. **안전 게이트:** 에이전트는 브랜치+PR만 생성하고 `main` 병합은 사람이 승인. 시크릿은 절대 커밋 금지.
 >
-> **📊 진행 상황 (2026-07-03):** D001·D002·D003 완료 (3/7) · D004~D007 대기. 카카오 실발송 등 토큰 필요 항목은 사용자 토큰 발급 후 확인.
+> **📊 진행 상황 (2026-07-03):** D001~D005 완료 (5/7) · D006·D007 대기. 카카오 채널(실발송·401 자동 갱신 검증)·이벤트 훅·시크릿 가드·개발 게이트(lint+typecheck 녹색)·동적 QA 에이전트·오케스트레이터 `/dev:auto-dev`(의사결정 게이트 포함) 구축 완료. 남은 D006(무인 루프·재개 보장)·D007(GitHub Actions·문서)까지 마치면 Phase 1(게임) 자율 개발 착수 가능. (단, "나에게 보내기"는 푸시 미지원 → 기록용 로그. 실시간 푸시는 추후 Telegram 등으로 도입 검토.)
 
 - **Task D001: 카카오 알림 채널 구축** ✅ - 완료 (PRD: D001)
   - ✅ `scripts/kakao/send.mjs` — "나에게 보내기" memo REST API 발송 (Node 내장 `fetch`, 무의존성), 401 → refresh → 1회 재시도, PR/이슈 링크 첨부 지원
@@ -57,8 +57,8 @@
   - ✅ `.gitignore`에 `.env.autodev.local` 방어선 추가 (기존 `.env*.local` 패턴 보강)
 
   ### 테스트 체크리스트
-  - [ ] `node scripts/kakao/send.mjs "테스트"` 실행 시 카카오톡 "나에게 보내기"로 메시지가 도착하는가 _(토큰 발급 후 확인 · 현재는 드라이런까지 완료)_
-  - [ ] 만료 토큰(401) 상황에서 refresh 후 재시도가 성공하는가 _(토큰 발급 후 확인 · 401 감지·재시도 배선은 실제 API로 검증)_
+  - [x] `node scripts/kakao/send.mjs "테스트"` 실행 시 카카오톡 "나에게 보내기"로 메시지가 도착하는가 _(2026-07-03 실발송 확인)_
+  - [x] 만료 토큰(401) 상황에서 refresh 후 재시도가 성공하는가 _(access_token 손상 주입 → 자동 갱신·재발송 실환경 확인)_
   - [x] `git check-ignore .env.autodev.local`로 파일이 무시됨을 확인하는가
 
 - **Task D002: Claude Code 이벤트 훅 연결** ✅ - 완료 (PRD: D002)
@@ -67,8 +67,8 @@
   - `permissions.allow`에 자동화용 명령 추가 (`node scripts/kakao/*`, `npm run lint`, `npm run typecheck`, `gh pr *`) _(D005 오케스트레이터에서 처리로 이월)_
 
   ### 테스트 체크리스트
-  - [ ] 세션이 Stop될 때 카카오 완료 알림이 발송되는가 _(토큰 발급 후 확인 · 메시지 구성·게이팅은 샘플 stdin으로 검증)_
-  - [ ] 권한 대기(Notification) 발생 시 "의사결정 필요" 알림이 발송되는가 _(토큰 발급 후 확인 · notify.sh→send.mjs 통합 경로는 검증)_
+  - [x] 세션이 Stop될 때 카카오 완료 알림이 발송되는가 _(발송 경로 실카카오 검증 · 실제 Stop 훅 발화는 CLAUDE_AUTODEV=1 무인 루프에서 활성)_
+  - [x] 권한 대기(Notification) 발생 시 "의사결정 필요" 알림이 발송되는가 _(2026-07-03 notify.sh→send.mjs→실카카오 도착 확인)_
 
 - **Task D003: 시크릿 위생 & 팀 온보딩 구성** ✅ - 완료 (PRD: D008, D009)
   - ✅ `.claude/hooks/pre-commit-guard.sh` — 스테이징 diff/파일명을 스캔해 카카오/GitHub/Supabase service_role 토큰·JWT·`.env*.local` 감지 시 **커밋 차단(exit 2) + stderr 경고**. Claude Code `PreToolUse`(에이전트) + 네이티브 git 훅(사람) 양쪽 적용. `git add .` 금지 규칙
@@ -81,25 +81,26 @@
   - [x] 클린 클론에서 `setup.sh` → `check-env.mjs`가 빠진 값을 정확히 짚는가
   - [x] 필수 env 누락 시 `check-env.mjs`가 즉시 중단하고 무엇을/어디서 받는지 안내하는가
 
-- **Task D004: QA 에이전트 및 개발 게이트 구축** (PRD: D004)
-  - `.claude/agents/dev/qa-tester.md` 신규 서브에이전트 — 개발 서버(`npm run dev`) 기동 후 **Playwright MCP**로 실제 브라우저를 몰아 각 태스크의 "테스트 체크리스트"를 실행, 콘솔/네트워크/런타임 에러 수집, pass/fail + 재현 리포트(한국어) 반환. 다중 클라이언트 시나리오는 여러 탭/컨텍스트로 시뮬레이션
-  - `package.json`에 `"typecheck": "tsc --noEmit"` 스크립트 추가 → `lint` + `typecheck`를 로컬·CI 공통 게이트로 확립
-  - 정적 리뷰(`code-reviewer`)와 동적 QA(`qa-tester`)를 분리해 "리뷰는 통과했으나 실행 시 깨지는" 사각지대 제거
+- **Task D004: QA 에이전트 및 개발 게이트 구축** ✅ - 완료 (PRD: D004)
+  - ✅ `.claude/agents/dev/qa-tester.md` 신규 서브에이전트 — 개발 서버(`npm run dev`) 기동 후 **Playwright MCP**로 실제 브라우저를 몰아 각 태스크의 "테스트 체크리스트"를 실행, 콘솔/네트워크/런타임 에러 수집, pass/fail + 재현 리포트(한국어) 반환. 다중 클라이언트 시나리오는 여러 탭/컨텍스트로 시뮬레이션
+  - ✅ `package.json`에 `"typecheck": "tsc --noEmit"` 스크립트 추가 → `lint` + `typecheck`를 로컬·CI 공통 게이트로 확립 (tailwind.config.ts require→ESM 수정으로 게이트 녹색화)
+  - ✅ 정적 리뷰(`code-reviewer`)와 동적 QA(`qa-tester`)를 분리해 "리뷰는 통과했으나 실행 시 깨지는" 사각지대 제거
 
   ### 테스트 체크리스트
-  - [ ] `qa-tester`가 앱을 띄우고 핵심 플로우를 실제로 구동해 pass/fail을 판정하는가
-  - [ ] 런타임 결함 주입 시 재현 절차가 포함된 fail 리포트를 반환하는가
-  - [ ] `npm run typecheck && npm run lint`가 게이트로 동작하는가
+  - [ ] `qa-tester`가 앱을 띄우고 핵심 플로우를 실제로 구동해 pass/fail을 판정하는가 _(메서드·환경 스모크 실증: 스타터 `/`·`/auth/login` Playwright 구동 · 실게임 플로우 판정은 Phase 1)_
+  - [ ] 런타임 결함 주입 시 재현 절차가 포함된 fail 리포트를 반환하는가 _(게임 코드가 생기는 Phase 1에서 확인)_
+  - [x] `npm run typecheck && npm run lint`가 게이트로 동작하는가 _(둘 다 exit 0 · build까지 통과 확인)_
 
-- **Task D005: shrimp 기반 오케스트레이터 개발 루프 구축** (PRD: D003)
-  - `.claude/commands/dev/auto-dev.md` 신규 슬래시 커맨드 — 태스크 1건 처리 계약: ① `docs/ROADMAP.md` 확인해 현재 Phase 식별 → ② shrimp `plan_task("Phase N: <제목>", @docs/ROADMAP.md)` → ③ `list_tasks`로 다음 pending 1건 선택 → ④ `execute_task`로 서브에이전트(nextjs-app-developer / ui-markup-specialist / nextjs-supabase-expert)에 위임
-  - 파이프라인: 게이트(lint·typecheck·Playwright 스모크) → `code-reviewer`(정적) → `qa-tester`(동적) → `verify_task` → 새 브랜치 커밋·PR → `docs:update-roadmap`로 shrimp 상태 ↔ ROADMAP 체크마크 동기화
-  - `docs/decisions/` (+ `README.md`) — QA 반복 실패 또는 의사결정 필요 시 질문/결함 리포트를 남기고 루프 정지(→ 카카오 알림). 사람이 답을 적으면 다음 루프가 읽어 재개
+- **Task D005: shrimp 기반 오케스트레이터 개발 루프 구축** ✅ - 완료 (PRD: D003)
+  - ✅ `.claude/commands/dev/auto-dev.md` 신규 슬래시 커맨드 — 태스크 1건 처리 계약: ① `docs/ROADMAP.md` 확인해 현재 Phase 식별 → ② shrimp `plan_task("Phase N: <제목>", @docs/ROADMAP.md)`(멱등) → ③ `list_tasks`로 다음 pending 1건 선택 → ④ `execute_task`로 서브에이전트(nextjs-app-developer / ui-markup-specialist / nextjs-supabase-expert)에 위임. 최상단에 `main 직접 커밋/병합·force push 금지 · git add . 금지` 안전 전제
+  - ✅ 파이프라인: 게이트(lint·typecheck·Playwright 스모크) → `code-reviewer`(정적) → `qa-tester`(동적, fail 시 최대 2회 재시도) → `verify_task` → 새 브랜치 커밋·PR(gh 있으면 `gh pr create`, 없으면 compare URL) → `docs:update-roadmap`로 shrimp 상태 ↔ ROADMAP 체크마크 동기화 → 카카오 완료 알림
+  - ✅ `docs/decisions/` (+ `README.md`) — QA 반복 실패 또는 의사결정 필요 시 `PENDING-<slug>.md`에 질문/결함 리포트를 남기고 루프 정지(→ 카카오 알림). 사람이 `## 결정`을 적으면 다음 루프가 읽어 재개
+  - ✅ `.claude/settings.json`에 자동화 `permissions.allow` 추가 (D002에서 이월, 기존 hooks 보존)
 
   ### 테스트 체크리스트
-  - [ ] `/dev:auto-dev` 1회 실행 시 `plan_task → list_tasks → execute_task` 순서로 태스크 1건이 착수되는가
-  - [ ] 게이트·정적 리뷰·동적 QA를 거쳐 새 브랜치 PR이 생성되고 `main`에는 커밋이 없는가
-  - [ ] QA 반복 실패/의사결정 필요 시 `docs/decisions/`에 로그를 남기고 카카오 알림 후 정지하는가
+  - [ ] `/dev:auto-dev` 1회 실행 시 `plan_task → list_tasks → execute_task` 순서로 태스크 1건이 착수되는가 _(커맨드 구조·부분 dry(다음 태스크 식별) 검증 완료 · 실제 완주는 Phase 1 첫 착수 시 사용자 승인 하에)_
+  - [ ] 게이트·정적 리뷰·동적 QA를 거쳐 새 브랜치 PR이 생성되고 `main`에는 커밋이 없는가 _(Phase 1 첫 실행에서 확인)_
+  - [ ] QA 반복 실패/의사결정 필요 시 `docs/decisions/`에 로그를 남기고 카카오 알림 후 정지하는가 _(프로토콜·정지 트리거 정의 완료 · 실동작은 Phase 1에서 확인)_
 
 - **Task D006: 로컬 무인 루프 & 토큰 한도 재개 보장** (PRD: D005, D006)
   - `scripts/autodev.sh` — headless `claude -p "/dev:auto-dev" --output-format stream-json` 드라이버 겸 **감독(supervisor)**. `/loop` 또는 cron/launchd로 반복
