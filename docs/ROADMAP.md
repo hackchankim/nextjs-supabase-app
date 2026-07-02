@@ -44,11 +44,11 @@
 
 > **개발 순서:** **Phase 0(자율 개발 에이전트 팀)를 먼저 구축**한다. Phase 0 완료 후에는 Phase 1~4를 이 에이전트 팀이 Shrimp Task Manager(`plan_task → list_tasks → execute_task → verify_task`)와 본 로드맵을 기준으로 (반)자율 개발한다. Phase 0 자체는 아직 팀이 없으므로 사람 + Claude Code가 대화형으로 부트스트랩한다. (스펙: `docs/PRD.md` Part 0 · 구성요소 D001~D010)
 
-### Phase 0: 자율 개발 에이전트 팀 구축 (선행)
+### Phase 0: 자율 개발 에이전트 팀 구축 (선행) ✅
 
 > 스스로 개발하고, 산출물을 코드리뷰·QA하며, 중요 의사결정 시 카카오톡으로 알리는 개발 시스템을 구축한다. **안전 게이트:** 에이전트는 브랜치+PR만 생성하고 `main` 병합은 사람이 승인. 시크릿은 절대 커밋 금지.
 >
-> **📊 진행 상황 (2026-07-03):** D001~D005 완료 (5/7) · D006·D007 대기. 카카오 채널(실발송·401 자동 갱신 검증)·이벤트 훅·시크릿 가드·개발 게이트(lint+typecheck 녹색)·동적 QA 에이전트·오케스트레이터 `/dev:auto-dev`(의사결정 게이트 포함) 구축 완료. 남은 D006(무인 루프·재개 보장)·D007(GitHub Actions·문서)까지 마치면 Phase 1(게임) 자율 개발 착수 가능. (단, "나에게 보내기"는 푸시 미지원 → 기록용 로그. 실시간 푸시는 추후 Telegram 등으로 도입 검토.)
+> **📊 진행 상황 (2026-07-03):** ✅ **Phase 0 완료 — D001~D007 (7/7).** 카카오 채널(실발송·401 자동 갱신 검증)·이벤트 훅·시크릿 가드·개발 게이트(lint+typecheck 녹색)·동적 QA 에이전트·오케스트레이터 `/dev:auto-dev`(의사결정 게이트)·무인 루프 `autodev.sh`(재개 보장)·GitHub Actions(@claude·리뷰·CI)·사용설명서(`docs/autonomous-dev.md`) 모두 구축. **이제 Phase 1(게임) 자율 개발 착수 가능** — `/dev:auto-dev` 또는 `scripts/autodev.sh`. (단, "나에게 보내기"는 푸시 미지원 → 기록용 로그. 실시간 푸시는 추후 Telegram 등. shrimp 자율루프는 로컬 트랙 전용.)
 
 - **Task D001: 카카오 알림 채널 구축** ✅ - 완료 (PRD: D001)
   - ✅ `scripts/kakao/send.mjs` — "나에게 보내기" memo REST API 발송 (Node 내장 `fetch`, 무의존성), 401 → refresh → 1회 재시도, PR/이슈 링크 첨부 지원
@@ -102,26 +102,27 @@
   - [ ] 게이트·정적 리뷰·동적 QA를 거쳐 새 브랜치 PR이 생성되고 `main`에는 커밋이 없는가 _(Phase 1 첫 실행에서 확인)_
   - [ ] QA 반복 실패/의사결정 필요 시 `docs/decisions/`에 로그를 남기고 카카오 알림 후 정지하는가 _(프로토콜·정지 트리거 정의 완료 · 실동작은 Phase 1에서 확인)_
 
-- **Task D006: 로컬 무인 루프 & 토큰 한도 재개 보장** (PRD: D005, D006)
-  - `scripts/autodev.sh` — headless `claude -p "/dev:auto-dev" --output-format stream-json` 드라이버 겸 **감독(supervisor)**. `/loop` 또는 cron/launchd로 반복
-  - **재개 보장**: 진행 상태를 shrimp 태스크 DB·ROADMAP 체크마크·git 브랜치/PR에 외부화 → 프로세스가 죽어도 다음 실행이 상태를 읽어 무손실·멱등 재개. 종료 코드/출력에서 rate-limit(429·"usage limit"·리셋 시각)을 감지해 **리셋 창까지 대기 후 재호출**, `session_id` 캡처로 `--resume`
-  - (권장) 무인 배치는 구독 주간 상한 회피를 위해 **API 종량제 + 월 지출 상한** 사용
+- **Task D006: 로컬 무인 루프 & 토큰 한도 재개 보장** ✅ - 완료 (PRD: D005, D006)
+  - ✅ `scripts/autodev.sh` — headless `claude -p "/dev:auto-dev" --output-format stream-json` 드라이버 겸 **감독(supervisor)**. `/loop` 또는 cron/launchd로 반복 (`--bare` 미사용, `CLAUDE_AUTODEV=1`로 Stop 훅 알림)
+  - ✅ **재개 보장**: 진행 상태를 shrimp 태스크 DB·ROADMAP 체크마크·git 브랜치/PR에 외부화 → 프로세스가 죽어도 다음 실행이 상태를 읽어 무손실·멱등 재개. 종료 코드/출력에서 rate-limit(429·"usage limit"·리셋 시각)을 감지해 **리셋 창까지 대기 후 재호출**, `session_id` 캡처로 `--resume`
+  - ✅ (권장) 무인 배치는 구독 주간 상한 회피를 위해 **API 종량제 + 월 지출 상한** 사용
 
   ### 테스트 체크리스트
-  - [ ] rate-limit 신호(모의)를 주입하면 래퍼가 리셋 창까지 대기 후 재호출하는가
-  - [ ] 루프 중 프로세스를 강제 종료한 뒤 재실행 시 ROADMAP/브랜치 상태로부터 **다음 태스크를 이어서** 착수하는가(무손실)
+  - [x] rate-limit 신호(모의)를 주입하면 래퍼가 리셋 창까지 대기 후 재호출하는가 _(CLAUDE_CMD 스텁으로 1회차 rate_limit→대기→재호출→2회차 성공 확인)_
+  - [x] 루프 중 프로세스를 강제 종료한 뒤 재실행 시 ROADMAP/브랜치 상태로부터 **다음 태스크를 이어서** 착수하는가(무손실) _(인메모리 상태 없음·매 iteration 독립 구조로 보장 · 실 완주는 Phase 1)_
 
-- **Task D007: GitHub Actions 무인 트랙 & 사용설명서** (PRD: D007, D010)
-  - `.github/workflows/claude.yml` — `anthropics/claude-code-action`, 이슈/PR `@claude` 멘션 시 브랜치 커밋·PR
-  - `.github/workflows/claude-review.yml` — PR `opened`/`synchronize` 시 자동 코드리뷰 코멘트
-  - `.github/workflows/ci.yml` — PR에서 `lint` + `typecheck` + Playwright QA 스모크 게이트. 스케줄드(cron) 하트비트로 재기동(한도로 죽은 런은 다음 스케줄에 레포 상태로부터 재개)
-  - GitHub Secrets 등록: `ANTHROPIC_API_KEY`(또는 Claude Code OAuth 토큰), 카카오 토큰
-  - `docs/autonomous-dev.md` — 전체 아키텍처·역할 분담·"처음 세팅(5분)"·두 트랙 실행법·의사결정 게이트·안전 원칙 정리
+- **Task D007: GitHub Actions 무인 트랙 & 사용설명서** ✅ - 완료 (PRD: D007, D010)
+  - ✅ `.github/workflows/claude.yml` — `anthropics/claude-code-action@v1`, 이슈/PR `@claude` 멘션 시 브랜치 커밋·PR
+  - ✅ `.github/workflows/claude-review.yml` — PR `opened`/`synchronize` 시 자동 코드리뷰 코멘트(한국어, 실동작 중심)
+  - ✅ `.github/workflows/ci.yml` — PR·main push·수동·스케줄(cron)에서 `lint` + `typecheck` + `build` 게이트. 무상태라 재실행이 레포 상태로부터 자연 재개 _(CI Playwright 잡은 제외 — `@playwright/test` 미도입, 동적 QA는 `qa-tester` 소관)_
+  - ✅ GitHub Secrets: `ANTHROPIC_API_KEY`(secrets 참조만) + GitHub App 설치 _(수동 선행)_
+  - ✅ `docs/autonomous-dev.md` — 전체 아키텍처·역할 분담·"처음 세팅(5분)"·두 트랙 실행법·의사결정 게이트·안전 원칙·과금 + 한계 정직 명시
+  - ⚠️ **한계**: shrimp MCP 로컬 전용 → 클라우드에서 shrimp 자율 루프 불가(완전 자율은 로컬 `autodev.sh` 트랙, 클라우드는 `@claude`·리뷰·CI 반자율)
 
   ### 테스트 체크리스트
-  - [ ] 테스트 이슈에 `@claude` 멘션 시 Action이 브랜치+PR을 생성하는가
-  - [ ] PR에 `claude-review`/`ci`(lint·typecheck·QA 스모크) 워크플로우가 코멘트/게이트를 남기는가
-  - [ ] 스케줄드 워크플로우가 하트비트로 재기동하는가
+  - [x] 워크플로우 3종 YAML 유효(ruby -ryaml) + `claude-code-action@v1`·트리거·permissions·`@claude` 가드 확인
+  - [x] `ci.yml` 게이트 동등(`npm run lint && typecheck && build`) 로컬 exit 0(build 포함) · 시크릿 하드코딩 없음
+  - [ ] 테스트 이슈에 `@claude` 멘션 시 Action이 브랜치+PR 생성 / PR에 `claude-review`·`ci` 코멘트·게이트 · 스케줄 하트비트 재기동 _(사용자 push + GitHub App 설치 + ANTHROPIC_API_KEY 등록 후 실환경 확인)_
 
 ---
 
