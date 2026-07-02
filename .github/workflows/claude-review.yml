@@ -1,0 +1,36 @@
+name: Claude PR Review
+
+# PR 이 열리거나 갱신될 때 Claude 가 변경분을 자동으로 코드리뷰하고 코멘트를 남긴다.
+# 선행 작업(수동): GitHub App 설치 + repo Secrets 에 ANTHROPIC_API_KEY 등록.
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Claude review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            이 PR의 변경분을 정확성·버그·회귀 위주로 한국어로 리뷰해 주세요.
+            코드 스타일보다 실제 동작(런타임 오류, 엣지 케이스, 보안, 시크릿 노출)에 집중하고,
+            문제는 파일:라인과 함께 구체적으로 지적한 뒤 요약 코멘트를 남겨 주세요.
+            프로젝트 규칙은 CLAUDE.md / shrimp-rules.md 를 따릅니다.
+          claude_args: "--max-turns 15"

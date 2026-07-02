@@ -1,0 +1,47 @@
+name: CI
+
+# 개발 게이트: lint + typecheck + build. PR·main push 에서 검증하고,
+# workflow_dispatch(수동)와 schedule(하트비트)로도 재실행한다.
+# CI 는 무상태이므로 스케줄/재실행은 레포 현재 상태로부터 자연 재개된다.
+# (동적 QA는 qa-tester 에이전트가 담당하며 이 CI 잡에는 포함하지 않는다.)
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
