@@ -1,4 +1,14 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(node scripts/kakao/*)",
+      "Bash(npm run lint:*)",
+      "Bash(npm run typecheck:*)",
+      "Bash(git switch:*)",
+      "Bash(git push:*)",
+      "Bash(gh:*)"
+    ]
+  },
   "hooks": {
     "PreToolUse": [
       {
