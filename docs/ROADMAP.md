@@ -42,6 +42,86 @@
 
 ## 개발 단계
 
+> **개발 순서:** **Phase 0(자율 개발 에이전트 팀)를 먼저 구축**한다. Phase 0 완료 후에는 Phase 1~4를 이 에이전트 팀이 Shrimp Task Manager(`plan_task → list_tasks → execute_task → verify_task`)와 본 로드맵을 기준으로 (반)자율 개발한다. Phase 0 자체는 아직 팀이 없으므로 사람 + Claude Code가 대화형으로 부트스트랩한다. (스펙: `docs/PRD.md` Part 0 · 구성요소 D001~D010)
+
+### Phase 0: 자율 개발 에이전트 팀 구축 (선행)
+
+> 스스로 개발하고, 산출물을 코드리뷰·QA하며, 중요 의사결정 시 카카오톡으로 알리는 개발 시스템을 구축한다. **안전 게이트:** 에이전트는 브랜치+PR만 생성하고 `main` 병합은 사람이 승인. 시크릿은 절대 커밋 금지.
+
+- **Task D001: 카카오 알림 채널 구축** - 우선순위 (PRD: D001)
+  - `scripts/kakao/send.mjs` — "나에게 보내기" memo REST API 발송 (Node 내장 `fetch`, 무의존성), 401 → refresh → 1회 재시도, PR/이슈 링크 첨부 지원
+  - `scripts/kakao/refresh.mjs` — `KAKAO_REST_API_KEY` + `KAKAO_REFRESH_TOKEN`으로 액세스 토큰 재발급 후 `.env.autodev.local`에 기록 (토큰 수명 ~6h)
+  - `.env.autodev.example` (커밋) / `.env.autodev.local` (gitignore) — `KAKAO_REST_API_KEY`, `KAKAO_REFRESH_TOKEN`, `KAKAO_ACCESS_TOKEN`
+  - `.gitignore`에 `.env.autodev.local` 방어선 추가 (기존 `.env*.local` 패턴 보강)
+
+  ### 테스트 체크리스트
+  - [ ] `node scripts/kakao/send.mjs "테스트"` 실행 시 카카오톡 "나에게 보내기"로 메시지가 도착하는가
+  - [ ] 만료 토큰(401) 상황에서 refresh 후 재시도가 성공하는가
+  - [ ] `git check-ignore .env.autodev.local`로 파일이 무시됨을 확인하는가
+
+- **Task D002: Claude Code 이벤트 훅 연결** (PRD: D002)
+  - `.claude/settings.json` 신규 생성 — `Stop`(작업 완료), `Notification`(권한/유휴 = 의사결정 필요) 훅을 `notify.sh`에 연결
+  - `.claude/hooks/notify.sh` — hook JSON을 stdin으로 받아 이벤트/메시지를 뽑아 `send.mjs`로 전달, env 로드 처리
+  - `permissions.allow`에 자동화용 명령 추가 (`node scripts/kakao/*`, `npm run lint`, `npm run typecheck`, `gh pr *`)
+
+  ### 테스트 체크리스트
+  - [ ] 세션이 Stop될 때 카카오 완료 알림이 발송되는가
+  - [ ] 권한 대기(Notification) 발생 시 "의사결정 필요" 알림이 발송되는가
+
+- **Task D003: 시크릿 위생 & 팀 온보딩 구성** (PRD: D008, D009)
+  - `.claude/hooks/pre-commit-guard.sh` — 커밋 직전 스테이징 diff를 스캔해 카카오/GitHub/Supabase service_role 토큰 패턴 또는 `.env*.local` 트래킹 감지 시 **커밋 차단 + 카카오 경고**. 오케스트레이터/`git:commit`은 `git add .` 금지, 의도한 파일만 스테이징
+  - `.env.example` — Supabase 자리표시자 (온보딩용, 커밋)
+  - `scripts/setup.sh` — `*.example` → 실제 파일 복사, `gh auth status`·카카오 토큰 유효성 점검, 빠진 항목 체크리스트 출력(fail-fast)
+  - `scripts/check-env.mjs` — 루프 시작 전 필수 env 검증(누락 시 즉시 중단 + 발급처 안내)
+
+  ### 테스트 체크리스트
+  - [ ] 시크릿을 일부러 스테이징하면 `pre-commit-guard.sh`가 커밋을 차단하는가
+  - [ ] 클린 클론에서 `setup.sh` → `check-env.mjs`가 빠진 값을 정확히 짚는가
+  - [ ] 필수 env 누락 시 `check-env.mjs`가 즉시 중단하고 무엇을/어디서 받는지 안내하는가
+
+- **Task D004: QA 에이전트 및 개발 게이트 구축** (PRD: D004)
+  - `.claude/agents/dev/qa-tester.md` 신규 서브에이전트 — 개발 서버(`npm run dev`) 기동 후 **Playwright MCP**로 실제 브라우저를 몰아 각 태스크의 "테스트 체크리스트"를 실행, 콘솔/네트워크/런타임 에러 수집, pass/fail + 재현 리포트(한국어) 반환. 다중 클라이언트 시나리오는 여러 탭/컨텍스트로 시뮬레이션
+  - `package.json`에 `"typecheck": "tsc --noEmit"` 스크립트 추가 → `lint` + `typecheck`를 로컬·CI 공통 게이트로 확립
+  - 정적 리뷰(`code-reviewer`)와 동적 QA(`qa-tester`)를 분리해 "리뷰는 통과했으나 실행 시 깨지는" 사각지대 제거
+
+  ### 테스트 체크리스트
+  - [ ] `qa-tester`가 앱을 띄우고 핵심 플로우를 실제로 구동해 pass/fail을 판정하는가
+  - [ ] 런타임 결함 주입 시 재현 절차가 포함된 fail 리포트를 반환하는가
+  - [ ] `npm run typecheck && npm run lint`가 게이트로 동작하는가
+
+- **Task D005: shrimp 기반 오케스트레이터 개발 루프 구축** (PRD: D003)
+  - `.claude/commands/dev/auto-dev.md` 신규 슬래시 커맨드 — 태스크 1건 처리 계약: ① `docs/ROADMAP.md` 확인해 현재 Phase 식별 → ② shrimp `plan_task("Phase N: <제목>", @docs/ROADMAP.md)` → ③ `list_tasks`로 다음 pending 1건 선택 → ④ `execute_task`로 서브에이전트(nextjs-app-developer / ui-markup-specialist / nextjs-supabase-expert)에 위임
+  - 파이프라인: 게이트(lint·typecheck·Playwright 스모크) → `code-reviewer`(정적) → `qa-tester`(동적) → `verify_task` → 새 브랜치 커밋·PR → `docs:update-roadmap`로 shrimp 상태 ↔ ROADMAP 체크마크 동기화
+  - `docs/decisions/` (+ `README.md`) — QA 반복 실패 또는 의사결정 필요 시 질문/결함 리포트를 남기고 루프 정지(→ 카카오 알림). 사람이 답을 적으면 다음 루프가 읽어 재개
+
+  ### 테스트 체크리스트
+  - [ ] `/dev:auto-dev` 1회 실행 시 `plan_task → list_tasks → execute_task` 순서로 태스크 1건이 착수되는가
+  - [ ] 게이트·정적 리뷰·동적 QA를 거쳐 새 브랜치 PR이 생성되고 `main`에는 커밋이 없는가
+  - [ ] QA 반복 실패/의사결정 필요 시 `docs/decisions/`에 로그를 남기고 카카오 알림 후 정지하는가
+
+- **Task D006: 로컬 무인 루프 & 토큰 한도 재개 보장** (PRD: D005, D006)
+  - `scripts/autodev.sh` — headless `claude -p "/dev:auto-dev" --output-format stream-json` 드라이버 겸 **감독(supervisor)**. `/loop` 또는 cron/launchd로 반복
+  - **재개 보장**: 진행 상태를 shrimp 태스크 DB·ROADMAP 체크마크·git 브랜치/PR에 외부화 → 프로세스가 죽어도 다음 실행이 상태를 읽어 무손실·멱등 재개. 종료 코드/출력에서 rate-limit(429·"usage limit"·리셋 시각)을 감지해 **리셋 창까지 대기 후 재호출**, `session_id` 캡처로 `--resume`
+  - (권장) 무인 배치는 구독 주간 상한 회피를 위해 **API 종량제 + 월 지출 상한** 사용
+
+  ### 테스트 체크리스트
+  - [ ] rate-limit 신호(모의)를 주입하면 래퍼가 리셋 창까지 대기 후 재호출하는가
+  - [ ] 루프 중 프로세스를 강제 종료한 뒤 재실행 시 ROADMAP/브랜치 상태로부터 **다음 태스크를 이어서** 착수하는가(무손실)
+
+- **Task D007: GitHub Actions 무인 트랙 & 사용설명서** (PRD: D007, D010)
+  - `.github/workflows/claude.yml` — `anthropics/claude-code-action`, 이슈/PR `@claude` 멘션 시 브랜치 커밋·PR
+  - `.github/workflows/claude-review.yml` — PR `opened`/`synchronize` 시 자동 코드리뷰 코멘트
+  - `.github/workflows/ci.yml` — PR에서 `lint` + `typecheck` + Playwright QA 스모크 게이트. 스케줄드(cron) 하트비트로 재기동(한도로 죽은 런은 다음 스케줄에 레포 상태로부터 재개)
+  - GitHub Secrets 등록: `ANTHROPIC_API_KEY`(또는 Claude Code OAuth 토큰), 카카오 토큰
+  - `docs/autonomous-dev.md` — 전체 아키텍처·역할 분담·"처음 세팅(5분)"·두 트랙 실행법·의사결정 게이트·안전 원칙 정리
+
+  ### 테스트 체크리스트
+  - [ ] 테스트 이슈에 `@claude` 멘션 시 Action이 브랜치+PR을 생성하는가
+  - [ ] PR에 `claude-review`/`ci`(lint·typecheck·QA 스모크) 워크플로우가 코멘트/게이트를 남기는가
+  - [ ] 스케줄드 워크플로우가 하트비트로 재기동하는가
+
+---
+
 ### Phase 1: 애플리케이션 골격 구축
 
 - **Task 001: 게임 라우트 구조 및 빈 페이지 생성** - 우선순위

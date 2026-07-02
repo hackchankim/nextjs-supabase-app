@@ -1,4 +1,97 @@
-# 교회 테마 마피아 게임 MVP PRD
+# 교회 마피아 게임 프로젝트 PRD
+
+> 이 문서는 두 파트로 구성된다. **Part 0(자율 개발 에이전트 팀)** 을 **먼저** 구축하고, 그 팀이 **Part 1(교회 마피아 게임)** 을 (반)자율로 개발한다. Part 0 = 개발 시스템 부트스트랩, Part 1 = 그 시스템으로 만드는 제품.
+
+## 📌 개발 순서 (선행 → 본 개발)
+
+1. **Part 0 — 자율 개발 에이전트 팀 인프라 (선행 · 최우선)**: 스스로 개발하고, 산출물을 코드리뷰·QA하며, 중요 의사결정 시 카카오톡으로 알리는 개발 시스템을 먼저 구축한다.
+2. **Part 1 — 교회 마피아 게임 MVP (본 개발)**: Part 0의 에이전트 팀이 **Shrimp Task Manager + `docs/ROADMAP.md`** 흐름(`plan_task → list_tasks → execute_task → verify_task`)으로 구현한다.
+
+---
+
+# 🤖 Part 0. 자율 개발 에이전트 팀 인프라 (선행 개발)
+
+## 🎯 핵심 정보
+
+**목적**: 개발자가 자리를 비워도 스스로 개발을 진행하고, 산출물을 자동으로 코드리뷰·QA한 뒤, 중요 의사결정이 필요할 때 카카오톡으로 알림을 보내는 (반)자율 개발 에이전트 팀을 구축한다
+**사용자**: 이 저장소에서 마피아 게임을 개발하는 1인 개발자(운영자), 그리고 저장소를 pull 받아 동일 환경을 세팅하는 협업자
+
+## 🔒 안전 원칙
+
+- 에이전트는 **새 브랜치에만 커밋하고 PR을 생성**한다. `main` 병합·배포는 **사람이 승인**한다 (human-in-the-loop).
+- 되돌리기 어려운 결정(DB 스키마 변경·외부 서비스 연동·비가역 작업)은 자동화하지 않고 **카카오 알림으로 사람에게 넘긴다**.
+- 시크릿(카카오·GitHub·Supabase 키)은 **절대 커밋하지 않는다** (다층 방어 · D008).
+
+## 🧩 구성 요소 (개발 대상)
+
+| ID | 구성요소 | 설명 | 대표 산출물 |
+|----|---------|------|------------|
+| **D001** | 카카오 알림 | "나에게 보내기"(memo REST API)로 완료·의사결정 알림 발송, 액세스 토큰 자동 갱신(401→refresh→재시도) | `scripts/kakao/send.mjs`, `scripts/kakao/refresh.mjs` |
+| **D002** | 이벤트 훅 | `Stop`(작업 완료)·`Notification`(권한/유휴=의사결정 필요) 훅으로 카카오 자동 발송 | `.claude/settings.json`, `.claude/hooks/notify.sh` |
+| **D003** | 오케스트레이터 | `ROADMAP 확인 → shrimp plan_task → list_tasks → execute_task` 순으로 태스크 1건씩 개발 → 게이트 → 리뷰 → QA → PR | `.claude/commands/dev/auto-dev.md` |
+| **D004** | QA 에이전트 | 앱을 실제로 띄우고 Playwright MCP로 동작(E2E) 테스트, 결함 시 개발 단계로 반려 (정적 리뷰와 별개) | `.claude/agents/dev/qa-tester.md` |
+| **D005** | 로컬 무인 루프 | headless `claude -p` 드라이버 겸 감독(supervisor), `/loop`·cron/launchd로 반복 | `scripts/autodev.sh` |
+| **D006** | 재개 보장 | 토큰/사용량 한도 초과 시 리셋 후 이어서 수행 — 상태 외부화(shrimp DB·ROADMAP·브랜치) + 리셋 창까지 대기 후 재호출 | `scripts/autodev.sh`, `scripts/check-env.mjs` |
+| **D007** | GitHub Actions | `@claude` 멘션 대응 + PR 자동 코드리뷰 + `lint·typecheck·Playwright QA 스모크` 게이트 + cron 하트비트 재기동 | `.github/workflows/*.yml` |
+| **D008** | 시크릿 위생 | `.env*.local` 격리, 커밋 직전 시크릿 스캔 가드(자동커밋 안전망), GitHub Secrets, `git add .` 금지 | `.claude/hooks/pre-commit-guard.sh`, `.gitignore` |
+| **D009** | 팀 온보딩 | `.example` 템플릿 + 원클릭 셋업 + 필수값 검증(fail-fast)으로 pull 후 5분 세팅 | `.env.autodev.example`, `scripts/setup.sh`, `scripts/check-env.mjs` |
+| **D010** | 사용설명서 | 전체 아키텍처·역할·카카오 셋업·두 트랙 실행법·의사결정 게이트·안전 원칙 문서화 | `docs/autonomous-dev.md` |
+
+## 🔁 개발 파이프라인
+
+```
+트리거(로컬 /loop·cron  또는  GitHub 이슈/PR @claude)
+      ↓
+오케스트레이터(/dev:auto-dev)
+  1) docs/ROADMAP.md 확인 → 현재 Phase 식별 (예: "Phase 1: 애플리케이션 골격 구축")
+  2) shrimp plan_task("Phase N: <제목>", @docs/ROADMAP.md)  → 태스크 분해·생성
+  3) shrimp list_tasks                                       → 다음 pending 태스크 1건 선택
+  4) shrimp execute_task(<id>)  →  적합한 서브에이전트에 위임
+      ↓
+게이트: npm run lint + npm run typecheck (+ Playwright 스모크)
+      ↓
+code-reviewer(정적 리뷰) → 반영
+      ↓
+qa-tester(앱 실제 실행 + Playwright MCP 동작 테스트) → 결함 시 개발 단계로 반려(최대 N회)
+      ↓
+shrimp verify_task(<id>) → 새 브랜치 커밋 → PR 생성 (main 직접 커밋 금지)
+      ↓
+docs:update-roadmap (shrimp 상태 ↔ ROADMAP 체크마크 동기화)
+      ↓
+[의사결정 필요/막힘] → 카카오 알림 + docs/decisions/ 로그 후 정지
+[작업 완료]         → 카카오 알림("PR #N 준비됨") → 다음 pending 태스크
+```
+
+## 👥 에이전트 팀 (역할 분담)
+
+- **기획/계획**: `development-planner`, `prd-generator` / `prd-validator`
+- **개발**: `nextjs-app-developer`, `ui-markup-specialist`, `nextjs-supabase-expert`
+- **정적 리뷰**: `code-reviewer`
+- **동적 QA**: `qa-tester` (신규)
+- **커밋·푸시·로드맵**: `git:commit`, `git:push`, `docs:update-roadmap`
+- **태스크 큐/상태**: Shrimp Task Manager MCP (`plan_task`/`list_tasks`/`execute_task`/`verify_task`)
+
+## 🛠️ 도구 스택
+
+- **Claude Code** — 서브에이전트, 슬래시 커맨드, hooks, headless(`-p`) 실행
+- **Shrimp Task Manager MCP** — 태스크 큐/상태 백엔드 (재개 상태 소스)
+- **Playwright MCP** — 동적 QA / E2E
+- **GitHub Actions** — 클라우드 무인 실행 + PR 자동 리뷰
+- **카카오 memo REST API** — "나에게 보내기" 알림
+- **(권장) Anthropic API 종량제 + 월 지출 상한** — 무인 배치 시 구독 주간 상한 회피
+
+## ⚙️ 필요 설정 (env / secrets)
+
+- **`.env.autodev.local`** (gitignore): `KAKAO_REST_API_KEY`, `KAKAO_REFRESH_TOKEN`, `KAKAO_ACCESS_TOKEN`
+- **`.env.local`** (gitignore): `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`
+- **GitHub Secrets**: `ANTHROPIC_API_KEY` (+ 카카오 토큰)
+- **`gh auth login`**: 로컬 GitHub 토큰은 OS 키체인에 저장 (파일 하드코딩 금지)
+
+---
+
+# 🎮 Part 1. 교회 테마 마피아 게임 MVP
+
+> 아래 제품 스펙은 **Part 0의 자율 개발 에이전트 팀이 개발**한다.
 
 ## 🎯 핵심 정보
 
