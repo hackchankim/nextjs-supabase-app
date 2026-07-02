@@ -47,37 +47,39 @@
 ### Phase 0: 자율 개발 에이전트 팀 구축 (선행)
 
 > 스스로 개발하고, 산출물을 코드리뷰·QA하며, 중요 의사결정 시 카카오톡으로 알리는 개발 시스템을 구축한다. **안전 게이트:** 에이전트는 브랜치+PR만 생성하고 `main` 병합은 사람이 승인. 시크릿은 절대 커밋 금지.
+>
+> **📊 진행 상황 (2026-07-03):** D001·D002·D003 완료 (3/7) · D004~D007 대기. 카카오 실발송 등 토큰 필요 항목은 사용자 토큰 발급 후 확인.
 
-- **Task D001: 카카오 알림 채널 구축** - 우선순위 (PRD: D001)
-  - `scripts/kakao/send.mjs` — "나에게 보내기" memo REST API 발송 (Node 내장 `fetch`, 무의존성), 401 → refresh → 1회 재시도, PR/이슈 링크 첨부 지원
-  - `scripts/kakao/refresh.mjs` — `KAKAO_REST_API_KEY` + `KAKAO_REFRESH_TOKEN`으로 액세스 토큰 재발급 후 `.env.autodev.local`에 기록 (토큰 수명 ~6h)
-  - `.env.autodev.example` (커밋) / `.env.autodev.local` (gitignore) — `KAKAO_REST_API_KEY`, `KAKAO_REFRESH_TOKEN`, `KAKAO_ACCESS_TOKEN`
-  - `.gitignore`에 `.env.autodev.local` 방어선 추가 (기존 `.env*.local` 패턴 보강)
-
-  ### 테스트 체크리스트
-  - [ ] `node scripts/kakao/send.mjs "테스트"` 실행 시 카카오톡 "나에게 보내기"로 메시지가 도착하는가
-  - [ ] 만료 토큰(401) 상황에서 refresh 후 재시도가 성공하는가
-  - [ ] `git check-ignore .env.autodev.local`로 파일이 무시됨을 확인하는가
-
-- **Task D002: Claude Code 이벤트 훅 연결** (PRD: D002)
-  - `.claude/settings.json` 신규 생성 — `Stop`(작업 완료), `Notification`(권한/유휴 = 의사결정 필요) 훅을 `notify.sh`에 연결
-  - `.claude/hooks/notify.sh` — hook JSON을 stdin으로 받아 이벤트/메시지를 뽑아 `send.mjs`로 전달, env 로드 처리
-  - `permissions.allow`에 자동화용 명령 추가 (`node scripts/kakao/*`, `npm run lint`, `npm run typecheck`, `gh pr *`)
+- **Task D001: 카카오 알림 채널 구축** ✅ - 완료 (PRD: D001)
+  - ✅ `scripts/kakao/send.mjs` — "나에게 보내기" memo REST API 발송 (Node 내장 `fetch`, 무의존성), 401 → refresh → 1회 재시도, PR/이슈 링크 첨부 지원
+  - ✅ `scripts/kakao/refresh.mjs` — `KAKAO_REST_API_KEY` + `KAKAO_REFRESH_TOKEN`으로 액세스 토큰 재발급 후 `.env.autodev.local`에 기록 (토큰 수명 ~12h)
+  - ✅ `.env.autodev.example` (커밋) / `.env.autodev.local` (gitignore) — `KAKAO_REST_API_KEY`, `KAKAO_REFRESH_TOKEN`, `KAKAO_ACCESS_TOKEN`
+  - ✅ `.gitignore`에 `.env.autodev.local` 방어선 추가 (기존 `.env*.local` 패턴 보강)
 
   ### 테스트 체크리스트
-  - [ ] 세션이 Stop될 때 카카오 완료 알림이 발송되는가
-  - [ ] 권한 대기(Notification) 발생 시 "의사결정 필요" 알림이 발송되는가
+  - [ ] `node scripts/kakao/send.mjs "테스트"` 실행 시 카카오톡 "나에게 보내기"로 메시지가 도착하는가 _(토큰 발급 후 확인 · 현재는 드라이런까지 완료)_
+  - [ ] 만료 토큰(401) 상황에서 refresh 후 재시도가 성공하는가 _(토큰 발급 후 확인 · 401 감지·재시도 배선은 실제 API로 검증)_
+  - [x] `git check-ignore .env.autodev.local`로 파일이 무시됨을 확인하는가
 
-- **Task D003: 시크릿 위생 & 팀 온보딩 구성** (PRD: D008, D009)
-  - `.claude/hooks/pre-commit-guard.sh` — 커밋 직전 스테이징 diff를 스캔해 카카오/GitHub/Supabase service_role 토큰 패턴 또는 `.env*.local` 트래킹 감지 시 **커밋 차단 + 카카오 경고**. 오케스트레이터/`git:commit`은 `git add .` 금지, 의도한 파일만 스테이징
-  - `.env.example` — Supabase 자리표시자 (온보딩용, 커밋)
-  - `scripts/setup.sh` — `*.example` → 실제 파일 복사, `gh auth status`·카카오 토큰 유효성 점검, 빠진 항목 체크리스트 출력(fail-fast)
-  - `scripts/check-env.mjs` — 루프 시작 전 필수 env 검증(누락 시 즉시 중단 + 발급처 안내)
+- **Task D002: Claude Code 이벤트 훅 연결** ✅ - 완료 (PRD: D002)
+  - ✅ `.claude/settings.json` 신규 생성 — `Stop`(작업 완료, `CLAUDE_AUTODEV=1` 게이팅), `Notification`(권한/유휴 = 의사결정 필요) 훅을 `notify.sh`에 연결
+  - ✅ `.claude/hooks/notify.sh` — hook JSON을 stdin으로 받아(node 파싱) 이벤트/메시지를 뽑아 `send.mjs`로 전달, 항상 exit 0(비블로킹)
+  - `permissions.allow`에 자동화용 명령 추가 (`node scripts/kakao/*`, `npm run lint`, `npm run typecheck`, `gh pr *`) _(D005 오케스트레이터에서 처리로 이월)_
 
   ### 테스트 체크리스트
-  - [ ] 시크릿을 일부러 스테이징하면 `pre-commit-guard.sh`가 커밋을 차단하는가
-  - [ ] 클린 클론에서 `setup.sh` → `check-env.mjs`가 빠진 값을 정확히 짚는가
-  - [ ] 필수 env 누락 시 `check-env.mjs`가 즉시 중단하고 무엇을/어디서 받는지 안내하는가
+  - [ ] 세션이 Stop될 때 카카오 완료 알림이 발송되는가 _(토큰 발급 후 확인 · 메시지 구성·게이팅은 샘플 stdin으로 검증)_
+  - [ ] 권한 대기(Notification) 발생 시 "의사결정 필요" 알림이 발송되는가 _(토큰 발급 후 확인 · notify.sh→send.mjs 통합 경로는 검증)_
+
+- **Task D003: 시크릿 위생 & 팀 온보딩 구성** ✅ - 완료 (PRD: D008, D009)
+  - ✅ `.claude/hooks/pre-commit-guard.sh` — 스테이징 diff/파일명을 스캔해 카카오/GitHub/Supabase service_role 토큰·JWT·`.env*.local` 감지 시 **커밋 차단(exit 2) + stderr 경고**. Claude Code `PreToolUse`(에이전트) + 네이티브 git 훅(사람) 양쪽 적용. `git add .` 금지 규칙
+  - ✅ `.env.example` — Supabase 자리표시자 (온보딩용, 커밋)
+  - ✅ `scripts/setup.sh` — `*.example` → 실제 파일 복사(기존 미덮어씀), 네이티브 git 훅 설치, `gh auth status` 점검, 빠진 항목 체크리스트 출력
+  - ✅ `scripts/check-env.mjs` — 루프 시작 전 필수 env 검증(누락 시 즉시 중단 + 발급처 안내)
+
+  ### 테스트 체크리스트
+  - [x] 시크릿을 일부러 스테이징하면 `pre-commit-guard.sh`가 커밋을 차단하는가
+  - [x] 클린 클론에서 `setup.sh` → `check-env.mjs`가 빠진 값을 정확히 짚는가
+  - [x] 필수 env 누락 시 `check-env.mjs`가 즉시 중단하고 무엇을/어디서 받는지 안내하는가
 
 - **Task D004: QA 에이전트 및 개발 게이트 구축** (PRD: D004)
   - `.claude/agents/dev/qa-tester.md` 신규 서브에이전트 — 개발 서버(`npm run dev`) 기동 후 **Playwright MCP**로 실제 브라우저를 몰아 각 태스크의 "테스트 체크리스트"를 실행, 콘솔/네트워크/런타임 에러 수집, pass/fail + 재현 리포트(한국어) 반환. 다중 클라이언트 시나리오는 여러 탭/컨텍스트로 시뮬레이션
