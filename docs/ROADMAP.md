@@ -128,13 +128,14 @@
 
 ### Phase 1: 애플리케이션 골격 구축
 
-- **Task 001: 게임 라우트 구조 및 빈 페이지 생성** - 우선순위
-  - `app/game/layout.tsx` — 게임 영역 공통 레이아웃 생성
-  - `app/game/page.tsx` — 입장 허브 빈 페이지 (F001, F002)
-  - `app/game/waiting/page.tsx` — 대기실 빈 페이지 (F003, F004, F019, F020)
-  - `app/game/play/page.tsx` — 게임 플레이 빈 페이지 (F005~F011, F014~F017)
-  - `app/game/admin/page.tsx` — 진행자 대시보드 빈 페이지 (F004, F006, F009, F011~F014, F017~F020)
-  - 각 페이지에 제목과 라우트 확인용 최소 마크업 삽입
+- **Task 001: 게임 라우트 구조 및 빈 페이지 생성** ✅ - 완료 (auto-dev · PR `auto/game-routes-scaffold`)
+  - ✅ `app/game/layout.tsx` — 게임 영역 공통 레이아웃 생성
+  - ✅ `app/game/page.tsx` — 입장 허브 빈 페이지 (F001, F002)
+  - ✅ `app/game/waiting/page.tsx` — 대기실 빈 페이지 (F003, F004, F019, F020)
+  - ✅ `app/game/play/page.tsx` — 게임 플레이 빈 페이지 (F005~F011, F014~F017)
+  - ✅ `app/game/admin/page.tsx` — 진행자 대시보드 빈 페이지 (F004, F006, F009, F011~F014, F017~F020)
+  - ✅ 각 페이지에 제목과 라우트 확인용 최소 마크업 삽입
+  - ✅ `lib/supabase/proxy.ts` — `/game` 하위를 인증 예외(공개)로 추가 _(QA가 로그인 리다이렉트 결함을 잡아 수정 · 게임은 로그인 없이 닉네임 입장 F001)_
 
 - **Task 002: 게임 타입 정의 및 상수 설계**
   - `lib/game/types.ts` — 핵심 TypeScript 타입 정의
