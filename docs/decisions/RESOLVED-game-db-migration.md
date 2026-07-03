@@ -1,6 +1,6 @@
 # Task 003 DB 마이그레이션 적용 + RLS 모델 결정
 
-- **상태**: PENDING
+- **상태**: RESOLVED (2026-07-04)
 - **작성**: 2026-07-04 · auto-dev
 - **관련 태스크**: Phase 1 Task 003 (Supabase DB 스키마 마이그레이션)
 
@@ -41,4 +41,10 @@ Task 002(타입·상수·유틸)까지 자동 완료 후 Task 003에 도달. Tas
 
 ## 결정
 
-<!-- 사람이 여기에 답을 적는다. 예: "Q1=A, Q2=A로 진행" 또는 다른 선택/지시. 채우면 상태를 RESOLVED로. -->
+**Q1 = A (프로덕션 직접 적용), Q2 = A (서버 계층 제어)** — 2026-07-04 사용자 승인.
+
+적용 결과:
+- `supabase/migrations/0001_game_schema.sql` 를 프로덕션에 적용 완료(5개 테이블 + 제약 + 인덱스).
+- RLS 활성화(전 테이블). 공개 읽기(anon): `game_rooms`, `game_messages`(public/system만), `game_votes`. 비밀 데이터(`game_players` 역할/토큰, `game_night_actions`, 비밀 채널 메시지, 모든 쓰기)는 anon 차단 → Server Action(service_role) 경유.
+- `lib/types/database.types.ts` 재생성(game 테이블 5종 반영).
+- **Phase 3(채팅/실시간) 구현 시**: 대기실 참가자 목록은 role/token을 제외한 Server Action으로 제공하고, 비밀 채널 실시간 수신 정책을 이 모델 위에서 확정한다.
