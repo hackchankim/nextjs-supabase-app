@@ -137,8 +137,8 @@
   - ✅ 각 페이지에 제목과 라우트 확인용 최소 마크업 삽입
   - ✅ `lib/supabase/proxy.ts` — `/game` 하위를 인증 예외(공개)로 추가 _(QA가 로그인 리다이렉트 결함을 잡아 수정 · 게임은 로그인 없이 닉네임 입장 F001)_
 
-- **Task 002: 게임 타입 정의 및 상수 설계**
-  - `lib/game/types.ts` — 핵심 TypeScript 타입 정의
+- **Task 002: 게임 타입 정의 및 상수 설계** ✅ - 완료 (auto-dev)
+  - ✅ `lib/game/types.ts` — 핵심 TypeScript 타입 정의
     - `GameRoom`, `GamePlayer`, `GameMessage`, `GameVote`, `GameNightAction`
     - `PlayerRole`: `'saint' | 'heretic' | 'heretic_leader' | 'pastor' | 'elder' | 'deaconess'`
     - `GameStatus`: `'waiting' | 'day' | 'night' | 'ended'`
