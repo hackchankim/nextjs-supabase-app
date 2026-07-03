@@ -11,6 +11,16 @@ export const ROLE_LABELS: Record<PlayerRole, string> = {
   deaconess: "권사님",
 };
 
+/** 역할별 한글 설명 (역할 카드에 표시되는 안내 문구) */
+export const ROLE_DESCRIPTIONS: Record<PlayerRole, string> = {
+  saint: "평범한 성도입니다. 특별한 능력은 없지만 지혜로운 토론으로 이단을 찾아내세요.",
+  heretic: "이단입니다. 성도인 척하며 이단 대장을 도와 공동체를 무너뜨리세요.",
+  heretic_leader: "이단 대장입니다. 밤마다 한 명을 제거할 수 있습니다.",
+  pastor: "목사님입니다. 밤마다 한 명을 조사해 이단 여부를 알 수 있습니다.",
+  elder: "장로님입니다. 특별한 능력은 없지만 당회(목사님)와 비밀 대화가 가능합니다.",
+  deaconess: "권사님입니다. 밤마다 한 명을 보호해 제거로부터 지킬 수 있습니다.",
+};
+
 /** 이단(악) 팀 역할 */
 export const HERETIC_ROLES: readonly PlayerRole[] = ["heretic", "heretic_leader"];
 
