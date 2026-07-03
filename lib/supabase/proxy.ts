@@ -51,7 +51,9 @@ export async function updateSession(request: NextRequest) {
     request.nextUrl.pathname !== "/" &&
     !user &&
     !request.nextUrl.pathname.startsWith("/login") &&
-    !request.nextUrl.pathname.startsWith("/auth")
+    !request.nextUrl.pathname.startsWith("/auth") &&
+    // 마피아 게임은 공개 — 로그인 없이 닉네임으로 입장(F001). /game 하위는 인증 예외.
+    !request.nextUrl.pathname.startsWith("/game")
   ) {
     // no user, potentially respond by redirecting the user to the login page
     const url = request.nextUrl.clone();
