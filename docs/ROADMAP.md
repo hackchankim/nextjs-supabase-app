@@ -170,23 +170,20 @@
 
 ### Phase 2: UI/UX 완성 (더미 데이터 활용)
 
-- **Task 004: 게임 전용 공통 컴포넌트 구축**
-  - shadcn/ui 추가 컴포넌트 설치
-    ```bash
-    npx shadcn@latest add dialog tabs avatar scroll-area sonner separator
-    ```
-  - 게임 공통 컴포넌트 구현 (`components/game/`)
-    - `PlayerCard.tsx` — 닉네임 + 생존/탈락 배지 카드
-    - `RoleCard.tsx` — 역할 공개 카드 (이름, 설명) — 모든 역할 동일 구조, 역할별 색상 차등 금지(무차별 UI)
-    - `PhaseBanner.tsx` — 낮/밤 페이즈 + 라운드 번호 배너 + 전환 카운트다운 표시 영역
-    - `ChatBubble.tsx` — 메시지 말풍선 (본인/타인/시스템 구분)
-    - `ChatPanel.tsx` — 전체/비밀/1:1 공용 채팅 패널 (ScrollArea + ChatBubble + 입력창)
-    - `SecretChannelTab.tsx` — 전원 동일 노출 "비밀 채널" 탭, 멤버십(이단/당회/개인)에 따라 내용만 분기
-    - `DirectMessageTab.tsx` — 상대 지정 1:1 귓속말 탭 (대상 선택 드롭다운 + ChatPanel)
-    - `VoteButton.tsx` — 투표 대상 선택 버튼
-    - `ActionPanel.tsx` — 밤 행동 패널 래퍼 — 전원 동일 형태의 대상 선택 UI(권한 없는 역할은 no-op)
-  - 무차별 UI 원칙: 중립 테마(역할별 색상/배지 금지), 동일 탭 구성을 컴포넌트 레벨에서 보장
-  - `lib/game/dummy.ts` — 더미 데이터 (참가자 목록, 채팅 메시지[public/heretic/council/dm], 투표 현황)
+- **Task 004: 게임 전용 공통 컴포넌트 구축** ✅ - 완료 (auto-dev)
+  - ✅ shadcn/ui 추가 컴포넌트 설치 (dialog tabs avatar scroll-area sonner separator)
+  - ✅ 게임 공통 컴포넌트 구현 (`components/game/`)
+    - ✅ `PlayerCard.tsx` — 닉네임 + 생존/탈락 배지 카드
+    - ✅ `RoleCard.tsx` — 역할 공개 카드 (이름, 설명) — 모든 역할 동일 구조, 역할별 색상 차등 금지(무차별 UI)
+    - ✅ `PhaseBanner.tsx` — 낮/밤 페이즈 + 라운드 번호 배너 + 전환 카운트다운 표시 영역
+    - ✅ `ChatBubble.tsx` — 메시지 말풍선 (본인/타인/시스템 구분)
+    - ✅ `ChatPanel.tsx` — 전체/비밀/1:1 공용 채팅 패널 (ScrollArea + ChatBubble + 입력창, 신규 메시지 자동 하단 스크롤)
+    - ✅ `SecretChannelTab.tsx` — 전원 동일 노출 "비밀 채널" 탭, 멤버십(이단/당회/개인)에 따라 내용만 분기
+    - ✅ `DirectMessageTab.tsx` — 상대 지정 1:1 귓속말 탭 (대상 선택 버튼 그룹 + ChatPanel)
+    - ✅ `VoteButton.tsx` — 투표 대상 선택 버튼
+    - ✅ `ActionPanel.tsx` — 밤 행동 패널 래퍼 — 전원 동일 형태의 대상 선택 UI(권한 없는 역할은 no-op)
+  - ✅ 무차별 UI 원칙: 중립 테마(역할별 색상/배지 금지), 동일 탭 구성을 컴포넌트 레벨에서 보장 (code-reviewer 정적 검증 + qa-tester 렌더 검증 통과)
+  - ✅ `lib/game/dummy.ts` — 더미 데이터 (참가자 10명, 채팅 메시지[public/heretic/council/dm/system], 투표 현황)
 
 - **Task 005: 입장 허브 & 대기실 페이지 UI 구현**
   - 입장 허브 페이지 (`app/game/page.tsx`)
