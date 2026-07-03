@@ -126,7 +126,7 @@
 
 ---
 
-### Phase 1: 애플리케이션 골격 구축
+### Phase 1: 애플리케이션 골격 구축 ✅
 
 - **Task 001: 게임 라우트 구조 및 빈 페이지 생성** ✅ - 완료 (auto-dev · PR `auto/game-routes-scaffold`)
   - ✅ `app/game/layout.tsx` — 게임 영역 공통 레이아웃 생성
@@ -151,8 +151,8 @@
   - `lib/game/constants.ts` — 역할 한글 표시명(목사님·장로님·권사님·이단·이단 대장·성도), 팀 분류, 당회 그룹(목사님+장로님) 정의, 인원별 역할 배분표
   - `lib/game/utils.ts` — 역할 배분 계산 함수, 당회/이단 그룹 판별 함수, 승리 조건 체크 함수 시그니처
 
-- **Task 003: Supabase DB 스키마 마이그레이션**
-  - `supabase/migrations/xxx_game_schema.sql` 작성 및 적용
+- **Task 003: Supabase DB 스키마 마이그레이션** ✅ - 완료 (auto-dev · 프로덕션 적용)
+  - ✅ `supabase/migrations/0001_game_schema.sql` 작성 및 적용 (5테이블 + RLS 서버계층 모델 · `database.types.ts` 재생성)
   - 5개 테이블 생성: `game_rooms`, `game_players`, `game_messages`, `game_votes`, `game_night_actions`
     - `game_rooms`: `transition_to`(null/day/night), `transition_at`(timestamptz, nullable) 컬럼 포함
     - `game_messages`: `recipient_id`(→ game_players.id, nullable), `channel`(public/heretic/council/dm/system) 포함
