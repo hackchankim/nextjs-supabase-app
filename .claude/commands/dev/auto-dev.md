@@ -1,5 +1,5 @@
 ---
-description: '자율 개발 루프 — ROADMAP의 다음 태스크 1건을 shrimp로 계획·구현·리뷰·QA한 뒤 브랜치+PR로 올린다'
+description: '자율 개발 루프 — ROADMAP의 다음 태스크 1건을 shrimp로 계획·구현·리뷰·QA한 뒤 브랜치에 커밋한다(push는 사용자가 나중에 일괄 처리)'
 allowed-tools:
   [
     'Task',
@@ -16,13 +16,13 @@ allowed-tools:
 
 # /dev:auto-dev — 자율 개발 루프 (한 번 호출 = 태스크 1건)
 
-> ⚠️ **이 커맨드는 실제 개발을 시작합니다.** 코드를 만들고 브랜치·커밋·PR을 생성합니다.
+> ⚠️ **이 커맨드는 실제 개발을 시작합니다.** 코드를 만들고 브랜치에 커밋합니다(push·PR은 이 루프에서 하지 않음).
 > D001~D004에서 만든 부품(카카오 알림·시크릿 가드·게이트·qa-tester)을 엮어 ROADMAP의
 > **다음 미완료 태스크 1건**을 처리합니다. 로직을 새로 만들지 말고 **기존 부품을 호출**하세요.
 
 ## 0. 안전 전제 (위반 시 즉시 중단)
 
-- ❌ **`main`에 직접 커밋/병합/push, force push 절대 금지.** 항상 새 작업 브랜치 → PR. `main` 병합은 사람이 승인.
+- ❌ **`main`에 직접 커밋/병합/push, force push 절대 금지.** 작업은 **새 브랜치에 커밋만** 한다. push·PR·`main` 병합은 사람이 나중에 처리한다.
 - ❌ **`git add .` 금지.** 의도한 파일만 스테이징한다(시크릿은 `pre-commit-guard`가 차단).
 - **한 번 호출 = 태스크 1건**만 처리하고 멈춘다(무한 진행 금지).
 - 되돌리기 어려운 결정·모호함·QA 반복 실패 → **12단계(의사결정 게이트)**로 정지한다.
@@ -72,14 +72,11 @@ allowed-tools:
 - `qa-tester` 서브에이전트에 위임해 앱을 실제로 띄워 대상 태스크의 "테스트 체크리스트"를 구동·판정받는다.
 - **fail이면 5단계로 돌아가 수정 후 재시도 (최대 2회).** 2회 초과로도 fail이면 **12단계**로 간다.
 
-## 9. verify → 커밋 → push → PR
+## 9. verify → 커밋 (브랜치, push 안 함)
 
 - `verify_task(<id>)`로 shrimp 태스크를 완료 처리한다.
 - `/git:commit` 규약(이모지+컨벤셔널, Claude 서명 금지, 의도한 파일만)으로 **작업 브랜치에** 커밋한다.
-- `git push -u origin auto/<task-slug>`.
-- PR 생성:
-  - `command -v gh` 가 있으면 `gh pr create --fill --base main --head auto/<task-slug>`.
-  - 없으면 `git remote get-url origin`으로 레포를 구해 **compare URL**을 만든다: `https://github.com/<owner>/<repo>/compare/main...auto/<task-slug>?expand=1`. (하드코딩하지 말고 remote에서 파싱)
+- ❌ **이 루프에서 `git push`·PR 생성은 하지 않는다.** 여러 태스크의 커밋을 브랜치에 쌓아두고, **사람이 나중에 `/git:push`로 일괄 push**한 뒤 GitHub에서 PR을 연다. (push가 자격증명을 물어 무인/연속 흐름을 끊기 때문)
 
 ## 10. ROADMAP 동기화
 
@@ -87,12 +84,12 @@ allowed-tools:
 
 ## 11. 완료 알림
 
-- `node scripts/kakao/send.mjs "[완료] <태스크명> PR 준비됨" --link <PR 또는 compare URL>` 로 카카오 알림을 보낸다.
+- `node scripts/kakao/send.mjs "[완료] <태스크명> 커밋 완료 (브랜치 auto/<task-slug>) · push 대기"` 로 카카오 알림을 보낸다. (대화형 세션에서 사람이 지켜보는 중이면 생략 가능)
 - 여기서 **정지**한다(다음 태스크는 다음 호출에서).
 
 ## 12. 의사결정 게이트 (정지 + 사람 개입)
 
-아래 상황이면 **강행하지 말고** `docs/decisions/`에 `PENDING-<slug>.md`(템플릿은 `docs/decisions/README.md`)를 남기고, `node scripts/kakao/send.mjs "[의사결정 필요] <요약>" --link <파일 경로/PR>` 로 알린 뒤 **정지**한다:
+아래 상황이면 **강행하지 말고** `docs/decisions/`에 `PENDING-<slug>.md`(템플릿은 `docs/decisions/README.md`)를 남기고, `node scripts/kakao/send.mjs "[의사결정 필요] <요약> — docs/decisions/PENDING-<slug>.md"` 로 알린 뒤 **정지**한다:
 
 - **비가역**: DB 스키마 변경, 외부 서비스 연동, 데이터 삭제 등.
 - **모호**: 스펙만으로 판단이 갈리고 코드·문서 확인으로도 안 풀리는 지점.
