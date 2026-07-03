@@ -78,7 +78,7 @@
 
 ## 4. 처음 세팅 (5분)
 
-1. **온보딩 스크립트**: `scripts/setup.sh` — `.env*.local` 템플릿 복사, 네이티브 git 시크릿 가드 설치, 체크리스트 출력.
+1. **온보딩 스크립트**: `bash scripts/setup.sh` — clone 직후 한 명령. **npm 의존성 설치(`npm ci`)** + `.env*.local` 템플릿 복사 + 네이티브 git 시크릿 가드 설치 + 체크리스트 출력.
 2. **Supabase**: `.env.local`에 `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` 입력.
 3. **카카오 토큰**(로컬 알림용): 카카오 디벨로퍼스 앱 생성 → REST API 키 → 카카오 로그인 `talk_message` 동의 → 인가 코드로 `node scripts/kakao/issue-token.mjs --code <CODE>` 실행(값은 `.env.autodev.local`에). 브라우저 동의는 세션에서 `! <command>`로 직접 실행.
 4. **GitHub Actions**(클라우드용): [GitHub App 설치](https://github.com/apps/claude) + repo Settings → Secrets에 `ANTHROPIC_API_KEY` 등록.
