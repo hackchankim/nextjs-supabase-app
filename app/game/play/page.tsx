@@ -25,7 +25,6 @@ import { ActionPanel } from "@/components/game/ActionPanel";
 import { ChatPanel } from "@/components/game/ChatPanel";
 import { DirectMessageTab } from "@/components/game/DirectMessageTab";
 import { PhaseBanner } from "@/components/game/PhaseBanner";
-import { PlayerCard } from "@/components/game/PlayerCard";
 import { RoleCard } from "@/components/game/RoleCard";
 import { SecretChannelTab } from "@/components/game/SecretChannelTab";
 import { VoteButton } from "@/components/game/VoteButton";
@@ -33,6 +32,10 @@ import { ROLE_LABELS } from "@/lib/game/constants";
 import { DUMMY_MESSAGES, DUMMY_PLAYERS } from "@/lib/game/dummy";
 import type { GameStatus, Winner } from "@/lib/game/types";
 import { canPerformNightAction, isCouncil, isHeretic } from "@/lib/game/utils";
+import { cn } from "@/lib/utils";
+
+/** 데모 컨트롤 노출 여부 — 개발 환경에서만 표시(역할 노출 방지, 프로덕션 빌드에서는 제거) */
+const SHOW_DEMO_CONTROLS = process.env.NODE_ENV === "development";
 
 export default function GamePlayPage() {
   // ─────────────────────────────────────────────────────────────
@@ -64,6 +67,12 @@ export default function GamePlayPage() {
   // 탈락자는 어떤 역할이든 행동 불가(canPerformNightAction이 isAlive까지 검사).
   const canAct = canPerformNightAction(currentPlayer.role, currentPlayer.isAlive);
 
+  // 팀별 생존 집계 — 개별 역할이 아닌 "팀 인원수"만 공개하므로 무차별 UI 원칙과 충돌하지 않는다.
+  // Phase 3에서는 서버가 개별 역할을 노출하지 않고 팀 집계만 내려주도록 해야 한다.
+  const alivePlayers = DUMMY_PLAYERS.filter((player) => player.isAlive);
+  const aliveHereticCount = alivePlayers.filter((player) => isHeretic(player.role)).length;
+  const aliveCommunityCount = alivePlayers.length - aliveHereticCount;
+
   return (
     <section className="mx-auto flex w-full max-w-3xl flex-col gap-4" data-route="game-play">
       <div className="text-center">
@@ -73,43 +82,54 @@ export default function GamePlayPage() {
         </p>
       </div>
 
-      {/* 데모 컨트롤 — 실제 게임 로직 아님. Phase 3에서 useGameSession/useGameChat 등으로 대체 예정 */}
-      <div className="flex flex-col gap-3 rounded-lg border border-dashed p-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-sm font-medium text-muted-foreground">보기 시점(데모):</span>
-          {DUMMY_PLAYERS.map((player) => (
+      {/* 데모 컨트롤 — 개발 환경에서만 노출(역할이 보이므로 프로덕션에는 렌더링 금지).
+          실제 게임 로직 아님. Phase 3에서 useGameSession/useGameChat 등으로 대체 예정 */}
+      {SHOW_DEMO_CONTROLS && (
+        <div className="flex flex-col gap-3 rounded-lg border border-dashed p-3">
+          <p className="text-xs font-semibold text-muted-foreground">
+            ⚠️ 개발용 데모 컨트롤 (참가자에게는 보이지 않음 · 프로덕션 빌드에서 자동 제거)
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-medium text-muted-foreground">보기 시점(데모):</span>
+            {DUMMY_PLAYERS.map((player) => (
+              <Button
+                key={player.id}
+                type="button"
+                size="sm"
+                variant={player.id === currentPlayerId ? "default" : "outline"}
+                onClick={() => setCurrentPlayerId(player.id)}
+              >
+                {player.nickname} ({ROLE_LABELS[player.role ?? "saint"]})
+              </Button>
+            ))}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-medium text-muted-foreground">페이즈(데모):</span>
             <Button
-              key={player.id}
               type="button"
               size="sm"
-              variant={player.id === currentPlayerId ? "default" : "outline"}
-              onClick={() => setCurrentPlayerId(player.id)}
+              variant="outline"
+              onClick={() => setStatus((prev) => (prev === "day" ? "night" : "day"))}
             >
-              {player.nickname} ({ROLE_LABELS[player.role ?? "saint"]})
+              낮/밤 전환 (현재: {status === "day" ? "낮" : "밤"})
             </Button>
-          ))}
-        </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-sm font-medium text-muted-foreground">페이즈(데모):</span>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            onClick={() => setStatus((prev) => (prev === "day" ? "night" : "day"))}
-          >
-            낮/밤 전환 (현재: {status === "day" ? "낮" : "밤"})
-          </Button>
-
-          <span className="ml-4 text-sm font-medium text-muted-foreground">종료(데모):</span>
-          <Button type="button" size="sm" variant="outline" onClick={() => setWinner("saints")}>
-            선 팀 승리 처리
-          </Button>
-          <Button type="button" size="sm" variant="outline" onClick={() => setWinner("heretics")}>
-            이단 팀 승리 처리
-          </Button>
+            <span className="ml-4 text-sm font-medium text-muted-foreground">종료(데모):</span>
+            <Button type="button" size="sm" variant="outline" onClick={() => setWinner("saints")}>
+              선 팀 승리 처리
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => setWinner("heretics")}
+            >
+              이단 팀 승리 처리
+            </Button>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* 내 역할 보기 — 버튼 문구는 역할과 무관하게 항상 동일 */}
       <Dialog>
@@ -129,14 +149,29 @@ export default function GamePlayPage() {
       {/* 페이즈 배너 */}
       <PhaseBanner status={status} phaseNumber={1} />
 
-      {/* 참가자 목록 — 생존 현황만 노출 */}
-      <div className="flex flex-col gap-2">
-        <h2 className="flex items-center gap-2 text-sm font-semibold text-muted-foreground">
-          <Users className="h-4 w-4" aria-hidden="true" /> 생존 현황
-        </h2>
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+      {/* 생존 현황 — 팀별 인원 집계(개별 역할 비노출) + 콤팩트 참가자 칩 */}
+      <div className="flex flex-col gap-2 rounded-lg border p-3">
+        <div className="flex items-center justify-between">
+          <h2 className="flex items-center gap-2 text-sm font-semibold text-muted-foreground">
+            <Users className="h-4 w-4" aria-hidden="true" /> 생존 현황
+          </h2>
+          <span className="text-sm font-medium">
+            공동체 {aliveCommunityCount}명 · 이단 {aliveHereticCount}명 생존
+          </span>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
           {DUMMY_PLAYERS.map((player) => (
-            <PlayerCard key={player.id} player={player} />
+            <span
+              key={player.id}
+              className={cn(
+                "rounded-full border px-2.5 py-1 text-xs",
+                player.isAlive
+                  ? "bg-background"
+                  : "text-muted-foreground line-through opacity-60",
+              )}
+            >
+              {player.nickname}
+            </span>
           ))}
         </div>
       </div>
