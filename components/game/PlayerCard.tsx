@@ -28,33 +28,33 @@ export function PlayerCard({ player, isOnline, showAliveStatus = true }: PlayerC
     >
       <CardContent className="flex items-center gap-3 p-4">
         {/* 닉네임 이니셜 아바타 — 역할 구분 없이 동일한 모양 */}
-        <Avatar>
+        <Avatar className="shrink-0">
           <AvatarFallback>{player.nickname.charAt(0)}</AvatarFallback>
         </Avatar>
 
-        <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-          <span className="truncate text-sm font-medium leading-none">
-            {player.nickname}
-          </span>
+        {/* 닉네임 — 가운데 유연 영역을 차지해 카드 폭을 채운다 */}
+        <span className="min-w-0 flex-1 truncate text-sm font-medium">
+          {player.nickname}
+        </span>
 
-          <div className="flex flex-wrap items-center gap-1.5">
-            {/* 생존/탈락 여부만 표시 — 역할 정보 없음 */}
-            {showAliveStatus && (
-              <Badge variant={player.isAlive ? "secondary" : "outline"}>
-                {player.isAlive ? "생존" : "탈락"}
-              </Badge>
-            )}
+        {/* 상태 배지 — 카드 오른쪽 끝에 정렬 */}
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+          {/* 생존/탈락 여부만 표시 — 역할 정보 없음 */}
+          {showAliveStatus && (
+            <Badge variant={player.isAlive ? "secondary" : "outline"}>
+              {player.isAlive ? "생존" : "탈락"}
+            </Badge>
+          )}
 
-            {isOnline !== undefined && (
-              <Badge variant="outline" className="gap-1.5">
-                <span
-                  className="h-1.5 w-1.5 shrink-0 rounded-full bg-current"
-                  aria-hidden="true"
-                />
-                {isOnline ? "온라인" : "오프라인"}
-              </Badge>
-            )}
-          </div>
+          {isOnline !== undefined && (
+            <Badge variant="outline" className="gap-1.5">
+              <span
+                className="h-1.5 w-1.5 shrink-0 rounded-full bg-current"
+                aria-hidden="true"
+              />
+              {isOnline ? "온라인" : "오프라인"}
+            </Badge>
+          )}
         </div>
       </CardContent>
     </Card>
