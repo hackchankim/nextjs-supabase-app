@@ -25,7 +25,7 @@ export default function GameWaitingPage() {
       <div className="flex flex-col gap-2 text-center">
         <h1 className="text-2xl font-bold">대기실</h1>
         <p className="text-muted-foreground">
-          참가자 실시간 목록(F003) · 역할 배분(F004) · 강퇴(F019) · 접속 상태(F020)
+          참가자들이 모두 모이면 진행자가 게임을 시작합니다.
         </p>
         <p className="text-sm font-medium">
           현재 인원 {DUMMY_PLAYERS.length} / 최소 {MIN_PLAYERS}명

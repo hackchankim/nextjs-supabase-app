@@ -77,9 +77,6 @@ export default function GamePlayPage() {
     <section className="mx-auto flex w-full max-w-3xl flex-col gap-4" data-route="game-play">
       <div className="text-center">
         <h1 className="text-2xl font-bold">게임 플레이</h1>
-        <p className="text-muted-foreground">
-          역할 카드 · 페이즈 · 채팅(전체/비밀/1:1) · 투표 · 밤 행동 (F005~F011, F014~F017)
-        </p>
       </div>
 
       {/* 데모 컨트롤 — 개발 환경에서만 노출(역할이 보이므로 프로덕션에는 렌더링 금지).
