@@ -250,24 +250,21 @@
   - [x] 잘못된 PIN 입력 시 에러 메시지가 표시되는가
   - [x] 브라우저 새로고침 후 세션이 복원되어 기존 상태로 돌아가는가
 
-- **Task 009: 대기실 실시간 참가자 목록 구현**
-  - game_rooms 초기화 (없으면 자동 생성, 있으면 재사용)
-  - `app/game/waiting/page.tsx`에 Supabase Realtime 구독
-    - `game_players` INSERT 이벤트 → 참가자 목록 실시간 갱신
-  - 게임 시작 Server Action (`lib/game/actions.ts`)
-    - 현재 참가자 수 기반 역할 배분 테이블 적용
-    - 10명: 이단2 + 이단 대장1 + 목사님1 + 장로님1 + 권사님1 + 성도4
-    - 15명: 이단3 + 이단 대장1 + 목사님1 + 장로님2 + 권사님1 + 성도7
-    - 20명: 이단4 + 이단 대장1 + 목사님1 + 장로님2 + 권사님1 + 성도11
-    - game_players 역할 일괄 UPDATE (무작위 셔플 후 배분)
-    - game_rooms status → `'day'`, phase_number → `1`
-  - game_rooms status 변경 이벤트 구독 → 전원 game/play로 자동 이동
+- **Task 009: 대기실 실시간 참가자 목록 구현** ✅ - 완료 (auto-dev · Realtime 첫 도입)
+  - ✅ **⚠️ 아키텍처 결정 — 실시간은 Broadcast 방식(Postgres Changes 폐기)**: Postgres Changes는 컬럼 권한(GRANT)을 무시하고 **전체 행(role·session_token·admin_pin)을 anon에게 전송**함이 실측으로 확인됨(컬럼 제한 시엔 아예 미전달). 따라서 game_players/game_rooms는 anon 완전 차단 유지, `game_players`/`game_rooms`를 realtime publication에 넣지 않고, **서버가 정제된 페이로드만 `room:<roomId>` 채널로 Broadcast**한다. 이 원칙은 후속 Task 010(채팅)·013(페이즈)에도 그대로 적용 — 비밀 컬럼 있는 테이블은 Broadcast로.
+  - ✅ `lib/game/realtime.ts` — 채널 규약(`room:<roomId>`)·이벤트(`player_joined`, `game_started`)·페이로드 타입(role 미포함). 후속 태스크 재사용용 공유 모듈
+  - ✅ `lib/game/broadcast.ts` — `import "server-only"`, service_role로 Broadcast REST(`/realtime/v1/api/broadcast`) 송출 (서버→클라 전달 실측 검증)
+  - ✅ 게임 시작 Server Action (`lib/game/actions.ts` `startGame`): PIN 재검증 → **상태 가드(status='waiting'만 시작 가능, 재시작 재셔플 방지)** → 인원 기반 역할 배분(10/15/20 배분표, Fisher-Yates 셔플) → game_players role 일괄 UPDATE → game_rooms status='day', phase_number=1 → GAME_STARTED broadcast
+  - ✅ `getRoomPlayers`(role/token 제외 정제 목록) + `joinGame` **정원(MAX_PLAYERS=20) 가드** + PLAYER_JOINED broadcast
+  - ✅ 대기실/진행자 대시보드: 더미 제거, 실시간 목록(초기 스냅샷+broadcast 델타, 레이스 병합) + 게임 시작 연동 + game_started 시 `/game/play` 자동 이동
+  - ⚠️ **후속 백로그**: Broadcast 공개 채널 위조 방지(private channel + `realtime.messages` RLS), 역할 배분 트랜잭션(RPC)화, PIN rate-limit
 
   ### 테스트 체크리스트
-  - [ ] 새 참가자 입장 시 대기실 목록에 실시간 추가되는가
-  - [ ] 10명 참가 후 게임 시작 시 역할이 올바른 비율로 배분되는가 (이단 대장 1명, 장로님 포함)
-  - [ ] 게임 시작 후 모든 참가자 화면이 게임 플레이 페이지로 이동하는가
-  - [ ] 진행자만 [게임 시작] 버튼이 보이는가
+  - [x] 새 참가자 입장 시 대기실/진행자 목록에 실시간 추가되는가 _(qa-tester: 양방향 실측)_
+  - [x] 10명 참가 후 게임 시작 시 역할이 올바른 비율로 배분되는가 (이단 대장 1명, 장로님 포함) _(SQL로 배분표 일치 확인)_
+  - [x] 게임 시작 후 모든 참가자 화면이 게임 플레이 페이지로 이동하는가
+  - [x] 진행자만 [게임 시작] 버튼이 보이는가 _(진행자 대시보드에서만, 시작 후 버튼 잠금)_
+  - [x] role/session_token이 클라이언트로 노출되지 않는가 _(getRoomPlayers 응답·broadcast 프레임 실측)_
 
 - **Task 010: 채팅 시스템 구현**
   - `lib/game/hooks/useGameChat.ts` — 채팅 상태 + Realtime 구독 훅 (채널별 구독)
