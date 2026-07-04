@@ -3,8 +3,16 @@
 // 게임 플레이 (F005~F011, F014~F017) — 역할 무차별 UI
 // 밤 행동 패널의 라벨/문구/외형은 역할과 무관하게 항상 동일해야 한다 (actionLabel="밤 행동" 고정).
 import { useState } from "react";
+import { MessageSquare, Users, Vote } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -122,59 +130,79 @@ export default function GamePlayPage() {
       <PhaseBanner status={status} phaseNumber={1} />
 
       {/* 참가자 목록 — 생존 현황만 노출 */}
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-        {DUMMY_PLAYERS.map((player) => (
-          <PlayerCard key={player.id} player={player} />
-        ))}
+      <div className="flex flex-col gap-2">
+        <h2 className="flex items-center gap-2 text-sm font-semibold text-muted-foreground">
+          <Users className="h-4 w-4" aria-hidden="true" /> 생존 현황
+        </h2>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {DUMMY_PLAYERS.map((player) => (
+            <PlayerCard key={player.id} player={player} />
+          ))}
+        </div>
       </div>
 
       {/* 채팅 — 전체 / 비밀 채널 / 1:1, 트리거 라벨은 역할과 무관하게 항상 동일 */}
-      <Tabs defaultValue="public">
-        <TabsList>
-          <TabsTrigger value="public">전체</TabsTrigger>
-          <TabsTrigger value="secret">비밀 채널</TabsTrigger>
-          <TabsTrigger value="dm">1:1</TabsTrigger>
-        </TabsList>
+      <div className="flex flex-col gap-2">
+        <h2 className="flex items-center gap-2 text-sm font-semibold text-muted-foreground">
+          <MessageSquare className="h-4 w-4" aria-hidden="true" /> 채팅
+        </h2>
+        <Tabs defaultValue="public">
+          <TabsList>
+            <TabsTrigger value="public">전체</TabsTrigger>
+            <TabsTrigger value="secret">비밀 채널</TabsTrigger>
+            <TabsTrigger value="dm">1:1</TabsTrigger>
+          </TabsList>
 
-        <TabsContent value="public">
-          <ChatPanel
-            messages={DUMMY_MESSAGES.filter((message) => message.channel === "public")}
-            currentPlayerId={currentPlayerId}
-            disabled={status === "night"}
-          />
-        </TabsContent>
+          <TabsContent value="public">
+            <ChatPanel
+              messages={DUMMY_MESSAGES.filter((message) => message.channel === "public")}
+              currentPlayerId={currentPlayerId}
+              disabled={status === "night"}
+            />
+          </TabsContent>
 
-        <TabsContent value="secret">
-          <SecretChannelTab
-            membership={membership}
-            messages={DUMMY_MESSAGES.filter((message) => message.channel === membership)}
-            currentPlayerId={currentPlayerId}
-          />
-        </TabsContent>
+          <TabsContent value="secret">
+            <SecretChannelTab
+              membership={membership}
+              messages={DUMMY_MESSAGES.filter((message) => message.channel === membership)}
+              currentPlayerId={currentPlayerId}
+            />
+          </TabsContent>
 
-        <TabsContent value="dm">
-          <DirectMessageTab
-            players={DUMMY_PLAYERS}
-            currentPlayerId={currentPlayerId}
-            messages={DUMMY_MESSAGES.filter((message) => message.channel === "dm")}
-            disabled={status === "night" || !currentPlayer.isAlive}
-          />
-        </TabsContent>
-      </Tabs>
+          <TabsContent value="dm">
+            <DirectMessageTab
+              players={DUMMY_PLAYERS}
+              currentPlayerId={currentPlayerId}
+              messages={DUMMY_MESSAGES.filter((message) => message.channel === "dm")}
+              disabled={status === "night" || !currentPlayer.isAlive}
+            />
+          </TabsContent>
+        </Tabs>
+      </div>
 
       {/* 하단 행동 패널 — 페이즈로만 분기, 역할에 따른 외형 분기 절대 금지 */}
       {status === "day" ? (
-        <div className="flex flex-col gap-2">
-          {aliveOthers.map((target) => (
-            <VoteButton
-              key={target.id}
-              target={target}
-              isSelected={selectedTargetId === target.id}
-              onVote={setSelectedTargetId}
-              disabled={!currentPlayer.isAlive}
-            />
-          ))}
-        </div>
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Vote className="h-4 w-4" aria-hidden="true" /> 투표
+            </CardTitle>
+            <CardDescription>
+              이단으로 의심되는 사람을 지목하세요. 낮 동안 언제든 바꿀 수 있습니다.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-2">
+            {aliveOthers.map((target) => (
+              <VoteButton
+                key={target.id}
+                target={target}
+                isSelected={selectedTargetId === target.id}
+                onVote={setSelectedTargetId}
+                disabled={!currentPlayer.isAlive}
+              />
+            ))}
+          </CardContent>
+        </Card>
       ) : (
         <>
           <ActionPanel
