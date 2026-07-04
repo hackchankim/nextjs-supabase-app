@@ -2,6 +2,9 @@
 import type { GamePlayer, PlayerRole, RoleDistribution, Winner } from "./types";
 import { COUNCIL_ROLES, HERETIC_ROLES, MAX_PLAYERS, MIN_PLAYERS } from "./constants";
 
+/** 밤 행동 권한 보유 역할 (제거/조사/보호) */
+const NIGHT_ACTION_ROLES: readonly PlayerRole[] = ["heretic_leader", "pastor", "deaconess"];
+
 /**
  * 인원수 기반 역할 배분 계산 (10~20명).
  * 대표점(10/15/20)과 일치: heretic=floor(n/5), 이단대장·목사님·권사님 각 1,
@@ -40,6 +43,17 @@ export function isCouncil(role: PlayerRole | null): boolean {
 /** 선 팀 여부 (이단 팀이 아니면 선 팀) */
 export function isSaintTeam(role: PlayerRole | null): boolean {
   return role !== null && !isHeretic(role);
+}
+
+/**
+ * 밤 행동 가능 여부 (제거/조사/보호 권한 보유 + 생존 상태).
+ * 탈락자는 어떤 역할이든 밤 행동을 수행할 수 없다.
+ */
+export function canPerformNightAction(
+  role: PlayerRole | null,
+  isAlive: boolean,
+): boolean {
+  return isAlive && role !== null && NIGHT_ACTION_ROLES.includes(role);
 }
 
 /**
