@@ -9,13 +9,22 @@ interface PlayerCardProps {
   player: GamePlayer;
   /** 온라인 여부 (Realtime Presence 연동 전에는 생략 가능) */
   isOnline?: boolean;
+  /** 생존/탈락 배지 표시 여부 (기본 true) — 대기실처럼 게임 시작 전에는 false로 숨긴다 */
+  showAliveStatus?: boolean;
 }
 
-export function PlayerCard({ player, isOnline }: PlayerCardProps) {
+export function PlayerCard({ player, isOnline, showAliveStatus = true }: PlayerCardProps) {
   return (
     <Card
-      className={cn("w-full transition-opacity", !player.isAlive && "opacity-60")}
-      aria-label={`${player.nickname}, ${player.isAlive ? "생존" : "탈락"}`}
+      className={cn(
+        "w-full transition-opacity",
+        showAliveStatus && !player.isAlive && "opacity-60",
+      )}
+      aria-label={
+        showAliveStatus
+          ? `${player.nickname}, ${player.isAlive ? "생존" : "탈락"}`
+          : player.nickname
+      }
     >
       <CardContent className="flex items-center gap-3 p-4">
         {/* 닉네임 이니셜 아바타 — 역할 구분 없이 동일한 모양 */}
@@ -30,9 +39,11 @@ export function PlayerCard({ player, isOnline }: PlayerCardProps) {
 
           <div className="flex flex-wrap items-center gap-1.5">
             {/* 생존/탈락 여부만 표시 — 역할 정보 없음 */}
-            <Badge variant={player.isAlive ? "secondary" : "outline"}>
-              {player.isAlive ? "생존" : "탈락"}
-            </Badge>
+            {showAliveStatus && (
+              <Badge variant={player.isAlive ? "secondary" : "outline"}>
+                {player.isAlive ? "생존" : "탈락"}
+              </Badge>
+            )}
 
             {isOnline !== undefined && (
               <Badge variant="outline" className="gap-1.5">
