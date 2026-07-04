@@ -233,21 +233,22 @@
 
 ### Phase 3: 핵심 기능 구현
 
-- **Task 008: 닉네임 입장 및 세션 관리 구현** - 우선순위
-  - `lib/game/hooks/useGameSession.ts` — 세션 토큰 관리 훅
-    - localStorage에 `session_token` (UUID) 저장/복원
-    - `player_id` 조회 (session_token → game_players)
-    - 세션 만료/없을 때 입장 허브로 리다이렉트
-  - 입장 허브 Server Action: 닉네임 중복 체크 + game_players INSERT + 토큰 발급
-  - 진행자 PIN 검증: game_rooms admin_pin 대조
-  - 게임 상태 기반 라우팅 (waiting → play 자동 이동)
+- **Task 008: 닉네임 입장 및 세션 관리 구현** ✅ - 완료 (auto-dev · 첫 실제 Supabase 쓰기)
+  - ✅ `lib/game/hooks/useGameSession.ts` — 세션 토큰 관리 훅
+    - ✅ localStorage `game_session_token`에 UUID 저장/복원
+    - ✅ `getPlayerBySession`(Server Action)로 player 조회 (role 미반환 — 무차별 UI)
+  - ✅ `lib/supabase/admin.ts` — service_role 서버 전용 클라이언트 (`import "server-only"` 가드, Fluid compute 대응)
+  - ✅ 입장 허브 Server Action(`lib/game/actions.ts`, `"use server"`): `joinGame`(닉네임 유효성·중복 체크·game_players INSERT·토큰 발급, 동시입장 23505 처리) + `verifyAdminPin`(admin_pin 대조) — 판별 유니온 반환
+  - ✅ 게임 상태 기반 라우팅 (닉네임→`/game/waiting`, PIN 정답→`/game/admin`)
+  - ✅ **보안 수정**: `game_rooms.admin_pin`이 anon(브라우저)에 노출되던 결함(Task 003 RLS 갭)을 마이그레이션 `0002_restrict_admin_pin.sql`(테이블 SELECT 회수 + admin_pin 제외 컬럼 재부여)로 프로덕션 차단. code-reviewer 발견 → 사용자 승인(컬럼 권한 회수) 후 적용·검증
+  - ⚠️ **후속 백로그**(이번 범위 밖): `verifyAdminPin` rate-limit(4자리 PIN 무차별 대입 방어), `/game/admin` 진입 시 서버 세션/쿠키 검증, `getOrCreateActiveRoom` select→insert 레이스(이벤트 규모상 저위험)
 
   ### 테스트 체크리스트
-  - [ ] 닉네임 입력 후 localStorage에 session_token이 저장되는가
-  - [ ] 동일 닉네임 중복 입장 시 에러 메시지가 표시되는가
-  - [ ] 올바른 PIN 입력 시 진행자 대시보드로 이동하는가
-  - [ ] 잘못된 PIN 입력 시 에러 메시지가 표시되는가
-  - [ ] 브라우저 새로고침 후 세션이 복원되어 기존 상태로 돌아가는가
+  - [x] 닉네임 입력 후 localStorage에 session_token이 저장되는가 _(qa-tester: 실 DB INSERT + UUID 저장 확인)_
+  - [x] 동일 닉네임 중복 입장 시 에러 메시지가 표시되는가
+  - [x] 올바른 PIN 입력 시 진행자 대시보드로 이동하는가 _(시드 room PIN '1234')_
+  - [x] 잘못된 PIN 입력 시 에러 메시지가 표시되는가
+  - [x] 브라우저 새로고침 후 세션이 복원되어 기존 상태로 돌아가는가
 
 - **Task 009: 대기실 실시간 참가자 목록 구현**
   - game_rooms 초기화 (없으면 자동 생성, 있으면 재사용)
