@@ -58,6 +58,11 @@ export default function GameEntryPage() {
     startTransition(async () => {
       const result = await verifyAdminPin(pin);
       if (result.ok) {
+        // 진행자 대시보드는 세션 토큰이 아닌 방 ID + PIN 조합으로 인증한다.
+        window.sessionStorage.setItem(
+          "game_admin_ctx",
+          JSON.stringify({ roomId: result.roomId, pin }),
+        );
         router.push("/game/admin");
       } else {
         setPinError(result.error);

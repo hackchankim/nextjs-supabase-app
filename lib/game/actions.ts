@@ -1,6 +1,11 @@
 "use server";
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { broadcastToRoom } from "@/lib/game/broadcast";
+import { GAME_EVENTS } from "@/lib/game/realtime";
+import { getRoleDistribution, distributionToRoleList } from "@/lib/game/utils";
+import { MIN_PLAYERS, MAX_PLAYERS } from "@/lib/game/constants";
+import type { PlayerRole } from "@/lib/game/types";
 import type { GameRoomRow } from "@/lib/types/database.types";
 
 /** 닉네임 최소/최대 길이 */
@@ -73,6 +78,20 @@ export async function joinGame(nickname: string): Promise<JoinGameResult> {
     const room = await getOrCreateActiveRoom();
     const supabase = createAdminClient();
 
+    // 정원 초과 방지 — 초과 인원은 역할 배분표에서 빠져 role이 null로 남고 승리 판정을 왜곡시킨다.
+    const { count, error: countError } = await supabase
+      .from("game_players")
+      .select("id", { count: "exact", head: true })
+      .eq("room_id", room.id);
+
+    if (countError) {
+      throw new Error(`인원 확인 실패: ${countError.message}`);
+    }
+
+    if ((count ?? 0) >= MAX_PLAYERS) {
+      return { ok: false, error: `정원(${MAX_PLAYERS}명)이 가득 찼습니다` };
+    }
+
     const { data: existingPlayer, error: selectError } = await supabase
       .from("game_players")
       .select("id")
@@ -113,6 +132,13 @@ export async function joinGame(nickname: string): Promise<JoinGameResult> {
     if (!newPlayer) {
       throw new Error("참가자 등록 실패: 알 수 없는 오류");
     }
+
+    // 대기실에 실시간으로 새 참가자를 알린다(비치명적 — 실패해도 입장 자체는 성공 처리).
+    await broadcastToRoom(room.id, GAME_EVENTS.PLAYER_JOINED, {
+      id: newPlayer.id,
+      nickname: trimmed,
+      isAlive: true,
+    });
 
     return { ok: true, sessionToken, playerId: newPlayer.id, roomId: room.id };
   } catch (error) {
@@ -176,5 +202,126 @@ export async function getPlayerBySession(token: string): Promise<SessionPlayer |
     };
   } catch {
     return null;
+  }
+}
+
+export interface RoomPlayer {
+  id: string;
+  nickname: string;
+  isAlive: boolean;
+}
+
+/**
+ * 방의 참가자 목록을 조회한다 (대기실/진행자 화면의 초기 목록용).
+ * role/session_token은 절대 포함하지 않는다 — 무차별 UI 원칙 및 역할 유출 방지.
+ */
+export async function getRoomPlayers(roomId: string): Promise<RoomPlayer[]> {
+  const supabase = createAdminClient();
+
+  const { data: players, error } = await supabase
+    .from("game_players")
+    .select("id, nickname, is_alive")
+    .eq("room_id", roomId)
+    .order("created_at");
+
+  if (error) {
+    throw new Error(`참가자 목록 조회 실패: ${error.message}`);
+  }
+
+  return (players ?? []).map((player) => ({
+    id: player.id,
+    nickname: player.nickname,
+    isAlive: player.is_alive,
+  }));
+}
+
+/**
+ * Fisher-Yates 셔플 — 배열을 새로 만들어 반환한다(원본 미변경).
+ * 역할 배분의 무작위성이 게임 공정성에 직결되므로 로컬로 직접 구현한다.
+ */
+function fisherYatesShuffle<T>(items: readonly T[]): T[] {
+  const shuffled = [...items];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled;
+}
+
+type StartGameResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * 진행자가 게임을 시작한다 — PIN 재검증 → 최소 인원 확인 → 역할 무작위 배분 →
+ * 방 상태를 낮(day)/1페이즈로 전환 → 참가자에게 Broadcast로 알림.
+ */
+export async function startGame(roomId: string, pin: string): Promise<StartGameResult> {
+  const verifyResult = await verifyAdminPin(pin);
+  if (!verifyResult.ok) {
+    return verifyResult;
+  }
+  if (verifyResult.roomId !== roomId) {
+    return { ok: false, error: "PIN이 올바르지 않습니다" };
+  }
+
+  try {
+    const supabase = createAdminClient();
+
+    // 상태 가드 — 이미 시작(day/night)된 게임에서 재호출 시 역할이 통째로 재셔플되는 것을 막는다.
+    // (버튼 중복 클릭·새로고침 후 재클릭·관리자 탭 중복 등)
+    const { data: room, error: roomError } = await supabase
+      .from("game_rooms")
+      .select("status")
+      .eq("id", roomId)
+      .single();
+
+    if (roomError || !room) {
+      throw new Error(`게임 방 조회 실패: ${roomError?.message ?? "방을 찾을 수 없습니다"}`);
+    }
+
+    if (room.status !== "waiting") {
+      return { ok: false, error: "이미 시작된 게임입니다" };
+    }
+
+    const players = await getRoomPlayers(roomId);
+
+    if (players.length < MIN_PLAYERS) {
+      return { ok: false, error: "게임 시작에는 최소 10명이 필요합니다" };
+    }
+
+    const distribution = getRoleDistribution(players.length);
+    const roles: PlayerRole[] = fisherYatesShuffle(distributionToRoleList(distribution));
+
+    const updates = players.map((player, index) =>
+      supabase
+        .from("game_players")
+        .update({ role: roles[index] })
+        .eq("id", player.id),
+    );
+    const updateResults = await Promise.all(updates);
+    const updateError = updateResults.find((result) => result.error)?.error;
+    if (updateError) {
+      throw new Error(`역할 배분 실패: ${updateError.message}`);
+    }
+
+    const { error: roomUpdateError } = await supabase
+      .from("game_rooms")
+      .update({ status: "day", phase_number: 1 })
+      .eq("id", roomId);
+
+    if (roomUpdateError) {
+      throw new Error(`게임 방 상태 전환 실패: ${roomUpdateError.message}`);
+    }
+
+    await broadcastToRoom(roomId, GAME_EVENTS.GAME_STARTED, {
+      status: "day",
+      phaseNumber: 1,
+    });
+
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
   }
 }
