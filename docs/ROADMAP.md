@@ -233,6 +233,11 @@
 
 ### Phase 3: 핵심 기능 구현
 
+> **🧭 실시간·재접속 설계 원칙 (Task 009에서 확립, 전 태스크 공통):**
+> 1. **서버 상태 = 단일 진실.** 모든 실시간 화면은 마운트 시 **서버 스냅샷을 조회**(Server Action, service_role, 정제된 필드만)하고 **이후 델타는 Broadcast로 구독**한다. Broadcast는 재전송이 안 되므로(휘발성) 놓친 이벤트는 스냅샷 재조회로 복원한다.
+> 2. **비밀 컬럼(role·session_token·admin_pin) 있는 테이블은 anon에 절대 노출 금지** — Postgres Changes(전체 행 전송) 대신 Broadcast로만. 본인 역할 등 "내 것"은 토큰으로 본인 1건만 조회하는 Server Action으로.
+> 3. **현재 status 기반 라우팅** — 각 화면은 `game_rooms.status`를 확인해 어긋나면 알맞은 화면으로 이동(재접속·이어하기의 기반). Task 010·011·012·013이 play 화면을 실데이터화하면서 이 원칙을 지키면 재접속이 자연히 따라온다.
+
 - **Task 008: 닉네임 입장 및 세션 관리 구현** ✅ - 완료 (auto-dev · 첫 실제 Supabase 쓰기)
   - ✅ `lib/game/hooks/useGameSession.ts` — 세션 토큰 관리 훅
     - ✅ localStorage `game_session_token`에 UUID 저장/복원
@@ -240,6 +245,7 @@
   - ✅ `lib/supabase/admin.ts` — service_role 서버 전용 클라이언트 (`import "server-only"` 가드, Fluid compute 대응)
   - ✅ 입장 허브 Server Action(`lib/game/actions.ts`, `"use server"`): `joinGame`(닉네임 유효성·중복 체크·game_players INSERT·토큰 발급, 동시입장 23505 처리) + `verifyAdminPin`(admin_pin 대조) — 판별 유니온 반환
   - ✅ 게임 상태 기반 라우팅 (닉네임→`/game/waiting`, PIN 정답→`/game/admin`)
+  - ✅ **지각 입장 차단**(Task 009 후 보강): `joinGame`이 `status!=='waiting'`이면 거부("이미 시작됨, 다음 게임 대기") — role=null 유령 참가자로 인한 승리 판정 왜곡 방지. **재접속 게이트**: 유효 세션이 있으면 입장 허브가 닉네임을 다시 묻지 않고 현재 status에 맞는 화면(대기실/게임)으로 자동 이동, 대기실은 이미 시작된 게임이면 게임 화면으로 이어붙임. `getPlayerBySession`이 `roomStatus`를 함께 반환(role은 여전히 미반환). _(qa-tester 실브라우저 검증)_
   - ✅ **보안 수정**: `game_rooms.admin_pin`이 anon(브라우저)에 노출되던 결함(Task 003 RLS 갭)을 마이그레이션 `0002_restrict_admin_pin.sql`(테이블 SELECT 회수 + admin_pin 제외 컬럼 재부여)로 프로덕션 차단. code-reviewer 발견 → 사용자 승인(컬럼 권한 회수) 후 적용·검증
   - ⚠️ **후속 백로그**(이번 범위 밖): `verifyAdminPin` rate-limit(4자리 PIN 무차별 대입 방어), `/game/admin` 진입 시 서버 세션/쿠키 검증, `getOrCreateActiveRoom` select→insert 레이스(이벤트 규모상 저위험)
 
@@ -379,6 +385,23 @@
   - [ ] 대기실에서 강퇴 시 대상이 목록에서 즉시 제거되는가
   - [ ] 게임 중 강퇴 시 대상이 탈락 처리되고 승리 조건이 재검사되는가
   - [ ] 진행자가 아닌 참가자는 강퇴를 실행할 수 없는가 (권한 거부)
+
+- **Task 013-2: 세션 재접속·이어하기 완성** - 우선순위
+  > 이탈(화면 잠금·백그라운드·네트워크 끊김·탭 종료·새로고침) 후 복귀한 참가자가 **닉네임 재입력 없이 게임에 매끄럽게 이어붙는** 경험을 완성한다. Task 008에서 기본 라우팅 게이트(지각 입장 차단·상태 기반 이동)는 이미 확립됐고, 이 태스크는 play 화면이 실데이터가 된 뒤(Task 010~013) **내 실제 역할·현재 페이즈·채팅 이력까지 복원**하는 부분을 마무리한다. (설계 원칙: Phase 3 상단 "실시간·재접속 설계 원칙" 참조)
+  - `getMyRole(token)` Server Action — 토큰으로 **본인 1건의 role만** 조회(남의 역할 미노출, 무차별 UI 유지). 재접속 시 내 역할 카드 복원용
+  - `getResumeState(token)` — 재접속 스냅샷: status·phaseNumber·isAlive·(내)role + 현재 페이즈 채팅/투표 스냅샷 훅 연동
+  - 공용 `useGameResume` 게이트 — 모든 게임 화면(`/game/*`)이 현재 status와 어긋나면 알맞은 화면으로 이동(대기/낮·밤/종료)
+  - `status='ended'` 복귀 → 게임 종료 결과 화면(전원 역할 공개, Task 006 오버레이 재사용)
+  - 탈락자 복귀 → 관전 모드(입력 비활성, 무차별 UI 유지)
+  - 저수준 소켓 재연결(백그라운드 복귀 시 Realtime 재구독)은 Task 015와 연계
+  - **선행 의존:** Task 010(채팅)·011(투표)·012(밤)·013(페이즈)이 play 화면을 실데이터화한 이후 착수해야 end-to-end 검증 가능
+
+  ### 테스트 체크리스트
+  - [ ] 게임 중 새로고침/재접속 시 닉네임 재입력 없이 현재 화면(낮/밤·내 역할·페이즈)으로 복원되는가
+  - [ ] 이탈 중 페이즈가 바뀌었어도 복귀 시 최신 상태로 동기화되는가 (스냅샷 재조회)
+  - [ ] 게임 종료 후 재접속 시 결과 화면이 보이는가
+  - [ ] 탈락자가 재접속 시 관전 모드(입력 불가)로 들어가는가
+  - [ ] 재접속 시에도 내 역할 외 다른 참가자 역할이 절대 노출되지 않는가 (네트워크/소켓 프레임 포함)
 
 - **Task 014: 전체 플로우 통합 테스트**
   - Playwright MCP를 사용한 E2E 테스트 시나리오 실행

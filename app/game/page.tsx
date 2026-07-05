@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
@@ -29,8 +29,15 @@ import { useGameSession } from "@/lib/game/hooks/useGameSession";
 // 입장 허브 (F001 닉네임 입장 · F002 진행자 PIN 입장)
 export default function GameEntryPage() {
   const router = useRouter();
-  const { setSession } = useGameSession();
+  const { player, loading, setSession } = useGameSession();
   const [isPending, startTransition] = useTransition();
+
+  // 재접속 게이트 — 이미 유효한 참가자 세션이 있으면 닉네임을 다시 묻지 않고
+  // 현재 게임 상태에 맞는 화면으로 자동 이동한다(이탈 후 복귀 시 막다른 길 제거).
+  useEffect(() => {
+    if (loading || !player) return;
+    router.replace(player.roomStatus === "waiting" ? "/game/waiting" : "/game/play");
+  }, [loading, player, router]);
 
   // 닉네임 입장(F001)용 입력 상태
   const [nickname, setNickname] = useState("");
@@ -69,6 +76,11 @@ export default function GameEntryPage() {
       }
     });
   };
+
+  // 세션 복원 중이거나 이미 세션이 있으면(위 게이트가 이동 처리) 입장 폼을 노출하지 않는다.
+  if (loading || player) {
+    return null;
+  }
 
   return (
     <section
