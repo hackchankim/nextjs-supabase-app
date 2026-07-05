@@ -37,10 +37,15 @@ export default function GameWaitingPage() {
   const [players, setPlayers] = useState<RoomPlayer[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  // 세션 복원이 끝났는데도 참가자 정보가 없으면 입장 화면으로 되돌린다.
+  // 세션/상태 기반 라우팅:
+  // - 세션이 없으면 입장 화면으로
+  // - 이미 게임이 시작된 뒤(대기 상태가 아님) 복귀했으면 게임 화면으로 이어붙인다.
   useEffect(() => {
-    if (!loading && !player) {
+    if (loading) return;
+    if (!player) {
       router.replace("/game");
+    } else if (player.roomStatus !== "waiting") {
+      router.replace("/game/play");
     }
   }, [loading, player, router]);
 

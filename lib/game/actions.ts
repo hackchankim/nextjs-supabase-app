@@ -5,7 +5,7 @@ import { broadcastToRoom } from "@/lib/game/broadcast";
 import { GAME_EVENTS } from "@/lib/game/realtime";
 import { getRoleDistribution, distributionToRoleList } from "@/lib/game/utils";
 import { MIN_PLAYERS, MAX_PLAYERS } from "@/lib/game/constants";
-import type { PlayerRole } from "@/lib/game/types";
+import type { GameStatus, PlayerRole } from "@/lib/game/types";
 import type { GameRoomRow } from "@/lib/types/database.types";
 
 /** 닉네임 최소/최대 길이 */
@@ -76,6 +76,14 @@ export async function joinGame(nickname: string): Promise<JoinGameResult> {
     }
 
     const room = await getOrCreateActiveRoom();
+
+    // 시작-후-입장 차단 — 이미 진행 중(day/night)인 게임에 새 참가자가 들어오면
+    // 역할이 배정되지 않은 채(배분은 시작 시점에 끝남) role=null로 남아 승리 판정을 왜곡시킨다.
+    // 명확히 거부한다(다음 게임 대기 안내).
+    if (room.status !== "waiting") {
+      return { ok: false, error: "게임이 이미 시작되었습니다. 다음 게임을 기다려주세요" };
+    }
+
     const supabase = createAdminClient();
 
     // 정원 초과 방지 — 초과 인원은 역할 배분표에서 빠져 role이 null로 남고 승리 판정을 왜곡시킨다.
@@ -174,11 +182,14 @@ export interface SessionPlayer {
   nickname: string;
   roomId: string;
   isAlive: boolean;
+  /** 현재 게임 상태 — 재접속 시 알맞은 화면으로 라우팅하기 위한 값(role은 미포함) */
+  roomStatus: GameStatus;
 }
 
 /**
  * 세션 토큰으로 참가자를 조회한다 (세션 복원용).
  * 무차별 대입으로 인한 역할 유출을 막기 위해 role은 반환하지 않는다.
+ * 재접속 라우팅을 위해 방의 현재 status는 함께 반환한다(status는 공개 정보).
  */
 export async function getPlayerBySession(token: string): Promise<SessionPlayer | null> {
   try {
@@ -194,11 +205,18 @@ export async function getPlayerBySession(token: string): Promise<SessionPlayer |
       return null;
     }
 
+    const { data: room } = await supabase
+      .from("game_rooms")
+      .select("status")
+      .eq("id", player.room_id)
+      .maybeSingle();
+
     return {
       id: player.id,
       nickname: player.nickname,
       roomId: player.room_id,
       isAlive: player.is_alive,
+      roomStatus: (room?.status ?? "waiting") as GameStatus,
     };
   } catch {
     return null;
