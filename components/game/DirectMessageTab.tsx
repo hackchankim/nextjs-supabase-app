@@ -13,6 +13,8 @@ interface DirectMessageTabProps {
   currentPlayerId: string;
   messages: GameMessage[];
   disabled?: boolean;
+  /** 전송 버튼 클릭 시 호출 (현재 선택된 대상 id와 함께) */
+  onSend?: (text: string, recipientId: string) => void;
 }
 
 export function DirectMessageTab({
@@ -20,6 +22,7 @@ export function DirectMessageTab({
   currentPlayerId,
   messages,
   disabled,
+  onSend,
 }: DirectMessageTabProps) {
   const [selectedTargetId, setSelectedTargetId] = useState<string | null>(null);
 
@@ -68,6 +71,9 @@ export function DirectMessageTab({
         currentPlayerId={currentPlayerId}
         disabled={disabled || !selectedTargetId}
         placeholder={selectedTargetId ? "메시지를 입력하세요" : "먼저 대상을 선택하세요"}
+        onSend={
+          selectedTargetId ? (text) => onSend?.(text, selectedTargetId) : undefined
+        }
       />
     </div>
   );

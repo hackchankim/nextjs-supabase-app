@@ -13,6 +13,9 @@
 # testing
 /coverage
 
+# qa-tester (Playwright MCP) 실행 아티팩트 — console/page 스냅샷 로그, 형상관리 제외
+/.playwright-mcp/
+
 # next.js
 /.next/
 /out/

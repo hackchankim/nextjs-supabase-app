@@ -9,14 +9,15 @@ import { roomChannel } from "@/lib/game/realtime";
 // Supabase Realtime Broadcast REST API를 service_role 키로 직접 호출한다(실측 검증된 패턴).
 
 /**
- * 지정한 방의 공개 채널로 Broadcast 이벤트를 송출한다.
+ * 임의 topic으로 Broadcast 이벤트를 송출한다 — 공개 room 채널뿐 아니라
+ * 개인 인박스 채널(room:{roomId}:inbox:{token}) 등 모든 topic에 사용할 수 있다.
  *
  * 실패하더라도 throw하지 않는다 — 실시간 알림은 부가 기능이며, 실패해도
- * 참가자 입장/게임 시작 같은 핵심 흐름(DB 반영)을 막아서는 안 된다.
+ * 참가자 입장/게임 시작/채팅 전송 같은 핵심 흐름(DB 반영)을 막아서는 안 된다.
  * 클라이언트가 이 파일을 import하면 안 된다("server-only"로 빌드 타임에 강제됨).
  */
-export async function broadcastToRoom(
-  roomId: string,
+export async function broadcastToTopic(
+  topic: string,
   event: string,
   payload: unknown,
 ): Promise<void> {
@@ -25,7 +26,7 @@ export async function broadcastToRoom(
     const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
     if (!supabaseUrl || !serviceRoleKey) {
-      console.error("broadcastToRoom: 환경 변수 누락으로 송출을 건너뜁니다");
+      console.error("broadcastToTopic: 환경 변수 누락으로 송출을 건너뜁니다");
       return;
     }
 
@@ -37,16 +38,27 @@ export async function broadcastToRoom(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        messages: [{ topic: roomChannel(roomId), event, payload }],
+        messages: [{ topic, event, payload }],
       }),
     });
 
     if (!response.ok) {
       console.error(
-        `broadcastToRoom: 송출 실패 (status=${response.status}, room=${roomId}, event=${event})`,
+        `broadcastToTopic: 송출 실패 (status=${response.status}, topic=${topic}, event=${event})`,
       );
     }
   } catch (error) {
-    console.error("broadcastToRoom: 송출 중 오류", error);
+    console.error("broadcastToTopic: 송출 중 오류", error);
   }
+}
+
+/**
+ * 지정한 방의 공개 채널로 Broadcast 이벤트를 송출한다 (roomChannel(roomId)로 위임).
+ */
+export async function broadcastToRoom(
+  roomId: string,
+  event: string,
+  payload: unknown,
+): Promise<void> {
+  await broadcastToTopic(roomChannel(roomId), event, payload);
 }
