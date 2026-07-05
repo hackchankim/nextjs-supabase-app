@@ -1,5 +1,5 @@
 // 교회 마피아 게임 — 상수 (역할 표시명·팀 분류·인원별 배분표)
-import type { PlayerRole, RoleDistribution } from "./types";
+import type { PlayerRole, RoleDistribution, Winner } from "./types";
 
 /** 역할 한글 표시명 */
 export const ROLE_LABELS: Record<PlayerRole, string> = {
@@ -34,6 +34,12 @@ export const SAINT_ROLES: readonly PlayerRole[] = [
 
 /** 당회 그룹 (목사님 + 장로님) — 당회 비밀 채팅 열람 대상 */
 export const COUNCIL_ROLES: readonly PlayerRole[] = ["pastor", "elder"];
+
+/** 승리 팀 한글 표시명 — 게임 종료 오버레이/배너에 사용 (전원 역할 공개는 Task 013 소관) */
+export const WINNER_LABELS: Record<Winner, string> = {
+  saints: "선 팀 승리!",
+  heretics: "이단 팀 승리!",
+};
 
 /** 지원 인원 범위 (10~20명) */
 export const MIN_PLAYERS = 10;

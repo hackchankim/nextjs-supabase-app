@@ -4,7 +4,7 @@
 // 전송함이 실측으로 확인되어 사용하지 않는다(game_players/game_rooms는 realtime publication에
 // 절대 추가하지 않는다). 대신 서버가 정제된 페이로드만 Broadcast로 송출한다.
 
-import type { ChatChannel } from "@/lib/game/types";
+import type { ChatChannel, Winner } from "@/lib/game/types";
 
 /** 방별 공개 Broadcast 채널명 (인증 불필요, 누구나 구독 가능) */
 export const roomChannel = (roomId: string) => `room:${roomId}`;
@@ -26,6 +26,12 @@ export const GAME_EVENTS = {
   GAME_STARTED: "game_started",
   /** 채팅 메시지가 도착했을 때 (공개 채널 또는 개인 인박스 채널) */
   CHAT_MESSAGE: "chat_message",
+  /** 낮 투표 집계가 갱신되었을 때 (투표/투표 변경 시마다) */
+  VOTE_UPDATE: "vote_update",
+  /** 참가자가 탈락(투표/밤 행동)했을 때 */
+  PLAYER_ELIMINATED: "player_eliminated",
+  /** 게임이 종료(승리 팀 확정)되었을 때 */
+  GAME_ENDED: "game_ended",
 } as const;
 
 /** PLAYER_JOINED 이벤트 페이로드 — role/session_token 제외 */
@@ -56,4 +62,27 @@ export interface ChatMessagePayload {
   /** 1:1 채팅 수신자 (channel === 'dm'일 때만) */
   recipientId: string | null;
   createdAt: string;
+}
+
+/**
+ * VOTE_UPDATE 이벤트 페이로드 — 대상별 득표 집계와 참여 현황만 담는다.
+ * 개별 투표자→대상 매핑(누가 누구에게 투표했는지)은 절대 포함하지 않는다(투표 비밀 보장).
+ */
+export interface VoteUpdatePayload {
+  /** 대상 참가자 id → 득표 수 */
+  tally: Record<string, number>;
+  /** 이번 페이즈에 투표를 마친 고유 투표자 수 */
+  voterCount: number;
+  /** 현재 생존자 수 */
+  aliveCount: number;
+}
+
+/** PLAYER_ELIMINATED 이벤트 페이로드 — 탈락 사유·역할은 포함하지 않는다 */
+export interface PlayerEliminatedPayload {
+  playerId: string;
+}
+
+/** GAME_ENDED 이벤트 페이로드 — 승리 팀만 공개한다 */
+export interface GameEndedPayload {
+  winner: Winner;
 }

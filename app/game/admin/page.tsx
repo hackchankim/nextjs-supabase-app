@@ -17,20 +17,34 @@ import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PhaseBanner } from "@/components/game/PhaseBanner";
 import { PlayerCard } from "@/components/game/PlayerCard";
-import { getRoomPlayers, startGame, type RoomPlayer } from "@/lib/game/actions";
-import { ROLE_LABELS, MIN_PLAYERS } from "@/lib/game/constants";
+import {
+  closeVoting,
+  getRoomPlayers,
+  resolveVoteElimination,
+  startGame,
+  type RoomPlayer,
+} from "@/lib/game/actions";
+import { ROLE_LABELS, MIN_PLAYERS, WINNER_LABELS } from "@/lib/game/constants";
 import {
   GAME_EVENTS,
   roomChannel,
+  type GameEndedPayload,
+  type PlayerEliminatedPayload,
   type PlayerJoinedPayload,
+  type VoteUpdatePayload,
 } from "@/lib/game/realtime";
-import { DUMMY_VOTES } from "@/lib/game/dummy";
-import type { GamePlayer, GameStatus } from "@/lib/game/types";
+import type { GamePlayer, GameStatus, Winner } from "@/lib/game/types";
 import { createClient } from "@/lib/supabase/client";
 
 /** sessionStorage에 저장된 진행자 인증 컨텍스트 (verifyAdminPin 성공 시 game/page.tsx가 저장) */
@@ -77,6 +91,17 @@ export default function GameAdminPage() {
   const [transitionAt, setTransitionAt] = useState<string | null>(null);
   const [systemMessage, setSystemMessage] = useState("");
   const [nightChecklist, setNightChecklist] = useState<Record<string, boolean>>({});
+
+  // 낮 투표 실데이터 — 초기 스냅샷 조회 수단이 없어(진행자는 세션 토큰이 없다) 0에서 시작해
+  // VOTE_UPDATE Broadcast로만 채운다(참가자 목록의 PLAYER_JOINED 초기 로드와 달리 실시간 갱신 전용).
+  const [tally, setTally] = useState<Record<string, number>>({});
+  const [voterCount, setVoterCount] = useState(0);
+  const [winner, setWinner] = useState<Winner | null>(null);
+  const [closeError, setCloseError] = useState<string | null>(null);
+  const [isClosingVote, setIsClosingVote] = useState(false);
+  const [tieCandidates, setTieCandidates] = useState<
+    { id: string; nickname: string; count: number }[] | null
+  >(null);
 
   // sessionStorage에서 진행자 인증 컨텍스트 복원 — 없으면 입장 화면으로 되돌린다.
   useEffect(() => {
@@ -146,6 +171,21 @@ export default function GameAdminPage() {
         // 시작되면 재시작 버튼을 잠근다(서버에도 상태 가드가 있지만 UI에서도 이중 방어).
         setGameStarted(true);
       })
+      .on("broadcast", { event: GAME_EVENTS.VOTE_UPDATE }, ({ payload }) => {
+        const update = payload as VoteUpdatePayload;
+        setTally(update.tally);
+        setVoterCount(update.voterCount);
+      })
+      .on("broadcast", { event: GAME_EVENTS.PLAYER_ELIMINATED }, ({ payload }) => {
+        const { playerId } = payload as PlayerEliminatedPayload;
+        setPlayers((prev) =>
+          prev.map((p) => (p.id === playerId ? { ...p, isAlive: false } : p)),
+        );
+      })
+      .on("broadcast", { event: GAME_EVENTS.GAME_ENDED }, ({ payload }) => {
+        const { winner: finishedWinner } = payload as GameEndedPayload;
+        setWinner(finishedWinner);
+      })
       .subscribe();
 
     return () => {
@@ -154,8 +194,9 @@ export default function GameAdminPage() {
   }, [adminCtx]);
 
   const aliveCount = players.filter((player) => player.isAlive).length;
-  const voteCount = new Set(DUMMY_VOTES.map((vote) => vote.voterId)).size;
-  const voteProgress = aliveCount > 0 ? (voteCount / aliveCount) * 100 : 0;
+  const voteProgress = aliveCount > 0 ? (voterCount / aliveCount) * 100 : 0;
+  // 조기 종료는 생존자 전원이 투표를 마쳤을 때만 허용한다(F018).
+  const canCloseEarly = aliveCount > 0 && voterCount === aliveCount;
 
   // 밤 행동 권한 보유 역할만 체크리스트에 나열 — 게임 시작 전에는 role이 없어 항상 빈 목록이다.
   const nightActors = players.filter(
@@ -182,6 +223,53 @@ export default function GameAdminPage() {
       setIsStarting(false);
     }
   }, [adminCtx]);
+
+  /**
+   * 투표를 마감한다 — 동률이면 tieCandidates를 채워 선택 Dialog를 띄우고,
+   * 단독 최다 득표면 서버가 즉시 탈락 처리한다(결과는 PLAYER_ELIMINATED/GAME_ENDED
+   * Broadcast로 화면에 반영되므로 여기서는 로컬 상태를 직접 건드리지 않는다).
+   */
+  const handleCloseVoting = useCallback(async () => {
+    if (!adminCtx) return;
+    setCloseError(null);
+    setIsClosingVote(true);
+    try {
+      const result = await closeVoting(adminCtx.roomId, adminCtx.pin);
+      if (result.ok) {
+        setTieCandidates(null);
+      } else if ("tie" in result) {
+        setTieCandidates(result.candidates);
+      } else {
+        setCloseError(result.error);
+      }
+    } catch {
+      setCloseError("투표 마감에 실패했습니다. 다시 시도해주세요.");
+    } finally {
+      setIsClosingVote(false);
+    }
+  }, [adminCtx]);
+
+  /** 동률 후보 중 한 명을 선택해 탈락을 확정한다. */
+  const handleResolveTie = useCallback(
+    async (targetId: string) => {
+      if (!adminCtx) return;
+      setCloseError(null);
+      setIsClosingVote(true);
+      try {
+        const result = await resolveVoteElimination(adminCtx.roomId, adminCtx.pin, targetId);
+        if (result.ok) {
+          setTieCandidates(null);
+        } else {
+          setCloseError(result.error);
+        }
+      } catch {
+        setCloseError("탈락 확정에 실패했습니다. 다시 시도해주세요.");
+      } finally {
+        setIsClosingVote(false);
+      }
+    },
+    [adminCtx],
+  );
 
   // 탈락 처리 — 생존 여부 토글 (데모, 실제로는 이후 태스크에서 Server Action으로 대체)
   function handleToggleAlive(playerId: string) {
@@ -236,6 +324,13 @@ export default function GameAdminPage() {
         </p>
       </div>
 
+      {/* 게임 종료 배너 — 승리 팀 텍스트까지만(전원 역할 공개는 Task 013 소관) */}
+      {winner && (
+        <div className="rounded-lg border bg-muted p-3 text-center text-lg font-bold">
+          {WINNER_LABELS[winner]}
+        </div>
+      )}
+
       <Tabs defaultValue="screen">
         <TabsList>
           <TabsTrigger value="screen">스크린</TabsTrigger>
@@ -261,8 +356,24 @@ export default function GameAdminPage() {
             <span className="text-sm font-medium text-muted-foreground">투표 현황</span>
             <Progress value={voteProgress} />
             <span className="text-sm text-muted-foreground">
-              {voteCount}/{aliveCount}명 투표 완료
+              {voterCount}/{aliveCount}명 투표 완료
             </span>
+            <div className="mt-2 flex flex-col gap-1.5">
+              {players
+                .filter((player) => player.isAlive)
+                .map((player) => (
+                  <div key={player.id} className="flex items-center gap-2">
+                    <span className="w-20 shrink-0 truncate text-sm">{player.nickname}</span>
+                    <Progress
+                      value={aliveCount > 0 ? ((tally[player.id] ?? 0) / aliveCount) * 100 : 0}
+                      className="flex-1"
+                    />
+                    <span className="w-8 shrink-0 text-right text-sm text-muted-foreground">
+                      {tally[player.id] ?? 0}
+                    </span>
+                  </div>
+                ))}
+            </div>
           </div>
         </TabsContent>
 
@@ -367,16 +478,26 @@ export default function GameAdminPage() {
             <span className="text-sm font-medium text-muted-foreground">투표 진행률</span>
             <Progress value={voteProgress} />
             <span className="text-sm text-muted-foreground">
-              {voteCount}/{aliveCount}명 투표 완료
+              {voterCount}/{aliveCount}명 투표 완료
             </span>
             <div className="flex flex-wrap gap-2">
-              <Button type="button" disabled title="이후 태스크에서 Server Action으로 구현 예정">
+              <Button
+                type="button"
+                onClick={() => void handleCloseVoting()}
+                disabled={isClosingVote || winner !== null}
+              >
                 투표 마감
               </Button>
-              <Button type="button" variant="outline" disabled={voteCount !== aliveCount}>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => void handleCloseVoting()}
+                disabled={isClosingVote || !canCloseEarly || winner !== null}
+              >
                 투표 조기 종료
               </Button>
             </div>
+            {closeError && <p className="text-destructive text-sm">{closeError}</p>}
           </div>
 
           {/* 밤 행동 완료 체크리스트 (이단 대장 · 목사님 · 권사님) */}
@@ -423,6 +544,30 @@ export default function GameAdminPage() {
           </div>
         </TabsContent>
       </Tabs>
+
+      {/* 동률 발생 시 진행자가 탈락자를 직접 선택하는 Dialog */}
+      <Dialog open={tieCandidates !== null} onOpenChange={(open) => !open && setTieCandidates(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>동률 발생 — 탈락자를 선택하세요</DialogTitle>
+          </DialogHeader>
+          <div className="flex flex-col gap-2">
+            {tieCandidates?.map((candidate) => (
+              <Button
+                key={candidate.id}
+                type="button"
+                variant="outline"
+                className="justify-between"
+                onClick={() => void handleResolveTie(candidate.id)}
+                disabled={isClosingVote}
+              >
+                <span>{candidate.nickname}</span>
+                <span className="text-muted-foreground">{candidate.count}표</span>
+              </Button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }

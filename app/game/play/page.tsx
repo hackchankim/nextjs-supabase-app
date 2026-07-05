@@ -35,9 +35,18 @@ import { VoteButton } from "@/components/game/VoteButton";
 import { getMyRole, getRoomPlayers, type RoomPlayer } from "@/lib/game/actions";
 import { useGameChat } from "@/lib/game/hooks/useGameChat";
 import { useGameSession } from "@/lib/game/hooks/useGameSession";
-import type { ChatMessagePayload } from "@/lib/game/realtime";
-import type { ChatChannel, GameMessage, GamePlayer, PlayerRole } from "@/lib/game/types";
+import { useGameVotes } from "@/lib/game/hooks/useGameVotes";
+import {
+  GAME_EVENTS,
+  roomChannel,
+  type ChatMessagePayload,
+  type GameEndedPayload,
+  type PlayerEliminatedPayload,
+} from "@/lib/game/realtime";
+import { WINNER_LABELS } from "@/lib/game/constants";
+import type { ChatChannel, GameMessage, GamePlayer, PlayerRole, Winner } from "@/lib/game/types";
 import { canPerformNightAction, isCouncil, isHeretic } from "@/lib/game/utils";
+import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 
 type SecretMembership = "heretic" | "council" | "none";
@@ -81,9 +90,15 @@ export default function GamePlayPage() {
   // 본인 role — 밤 행동 가능 여부·비밀 채널 소속 계산에만 쓰인다. 남의 role은 절대 조회하지 않는다.
   const [role, setRole] = useState<PlayerRole | null>(null);
   const [players, setPlayers] = useState<RoomPlayer[]>([]);
-  const [selectedTargetId, setSelectedTargetId] = useState<string | null>(null);
   const [nightActionTargetId, setNightActionTargetId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"public" | "secret" | "dm">("public");
+  // winner는 게임 종료 상태 그 자체(한 번 확정되면 되돌리지 않는다) — 투표 패널을 감추는 근거.
+  // 종료 오버레이의 여닫기는 별도 상태(resultOpen)로 분리해, 닫아도 winner가 유지되도록 한다.
+  const [winner, setWinner] = useState<Winner | null>(null);
+  const [resultOpen, setResultOpen] = useState(false);
+  // 본인 탈락 여부 — useGameSession의 player.isAlive는 마운트 시 1회만 세팅되므로,
+  // PLAYER_ELIMINATED로 본인이 탈락하면 이 플래그로 즉시 입력을 비활성화한다.
+  const [selfEliminated, setSelfEliminated] = useState(false);
 
   // 세션 기반 라우팅 가드 — 세션 없으면 입장 화면, 아직 대기 중이면 대기실로.
   useEffect(() => {
@@ -143,12 +158,55 @@ export default function GamePlayPage() {
     }
   };
 
+  // 낮 투표 실데이터 — 초기 스냅샷 + VOTE_UPDATE 델타(집계만, 개별 투표자→대상 매핑 없음)
+  const { tally, myVote, castVote } = useGameVotes({
+    roomId: player?.roomId ?? "",
+    sessionToken: sessionToken ?? "",
+  });
+
+  const handleVote = async (targetId: string) => {
+    const result = await castVote(targetId);
+    if (!result.ok) {
+      toast.error(result.error);
+    }
+  };
+
+  // 탈락/종료 구독 — 채팅·투표와는 별도 채널 인스턴스로 간단히 구독한다.
+  useEffect(() => {
+    if (!player) return;
+
+    const supabase = createClient();
+    const channel = supabase
+      .channel(roomChannel(player.roomId))
+      .on("broadcast", { event: GAME_EVENTS.PLAYER_ELIMINATED }, ({ payload }) => {
+        const { playerId } = payload as PlayerEliminatedPayload;
+        setPlayers((prev) =>
+          prev.map((p) => (p.id === playerId ? { ...p, isAlive: false } : p)),
+        );
+        if (playerId === player.id) {
+          setSelfEliminated(true);
+        }
+      })
+      .on("broadcast", { event: GAME_EVENTS.GAME_ENDED }, ({ payload }) => {
+        const { winner: finishedWinner } = payload as GameEndedPayload;
+        setWinner(finishedWinner);
+        setResultOpen(true);
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [player]);
+
   if (loading || !player) {
     return null;
   }
 
   const roomId = player.roomId;
   const status = player.roomStatus;
+  // 본인 생존 여부 — 세션의 초기값과 실시간 탈락(PLAYER_ELIMINATED)을 함께 반영한다.
+  const selfAlive = player.isAlive && !selfEliminated;
 
   // 생존자 목록(자신 제외) — 낮 투표/밤 행동 공통 대상
   const aliveOthers = players
@@ -157,7 +215,7 @@ export default function GamePlayPage() {
 
   // 밤 행동 가능 여부 — 외형은 절대 분기하지 않고, 오직 canAct(boolean)로만 활성화 여부 결정.
   // 탈락자는 어떤 역할이든 행동 불가(canPerformNightAction이 isAlive까지 검사).
-  const canAct = canPerformNightAction(role, player.isAlive);
+  const canAct = canPerformNightAction(role, selfAlive);
 
   const aliveCount = players.filter((p) => p.isAlive).length;
 
@@ -237,7 +295,7 @@ export default function GamePlayPage() {
             <ChatPanel
               messages={publicMessages}
               currentPlayerId={player.id}
-              disabled={status === "night" || !player.isAlive}
+              disabled={status === "night" || !selfAlive}
               onSend={(text) => void handleSend("public", text)}
             />
           </TabsContent>
@@ -247,7 +305,7 @@ export default function GamePlayPage() {
               membership={membership}
               messages={secretMessages}
               currentPlayerId={player.id}
-              disabled={status === "day" || !player.isAlive}
+              disabled={status === "day" || !selfAlive}
               onSend={(text) => {
                 if (membership === "none") return;
                 void handleSend(membership, text);
@@ -260,7 +318,7 @@ export default function GamePlayPage() {
               players={players.map((p) => toGamePlayer(p, roomId))}
               currentPlayerId={player.id}
               messages={dmMessages}
-              disabled={status === "night" || !player.isAlive}
+              disabled={status === "night" || !selfAlive}
               onSend={(text, recipientId) => void handleSend("dm", text, recipientId)}
             />
           </TabsContent>
@@ -268,8 +326,9 @@ export default function GamePlayPage() {
       </div>
 
       {/* 하단 행동 패널 — 페이즈로만 분기, 역할에 따른 외형 분기 절대 금지
-          투표/밤 행동 실제 반영은 Task 011/012 범위 — 여기서는 크래시 없이 렌더만 한다. */}
-      {status === "day" ? (
+          투표(Task 011)는 실데이터로 연결되었다. 밤 행동은 Task 012 범위 — 크래시 없이 렌더만 한다.
+          게임이 종료(winner)되면 투표 패널을 감춰 종료 후 조작 가능한 것처럼 보이지 않게 한다. */}
+      {winner ? null : status === "day" ? (
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
@@ -281,13 +340,19 @@ export default function GamePlayPage() {
           </CardHeader>
           <CardContent className="flex flex-col gap-2">
             {aliveOthers.map((target) => (
-              <VoteButton
-                key={target.id}
-                target={target}
-                isSelected={selectedTargetId === target.id}
-                onVote={setSelectedTargetId}
-                disabled={!player.isAlive}
-              />
+              <div key={target.id} className="flex items-center gap-2">
+                <div className="flex-1">
+                  <VoteButton
+                    target={target}
+                    isSelected={myVote === target.id}
+                    onVote={handleVote}
+                    disabled={!selfAlive}
+                  />
+                </div>
+                <span className="w-10 shrink-0 text-right text-sm text-muted-foreground">
+                  {tally[target.id] ?? 0}표
+                </span>
+              </div>
             ))}
           </CardContent>
         </Card>
@@ -304,6 +369,24 @@ export default function GamePlayPage() {
               선택됨: {players.find((p) => p.id === nightActionTargetId)?.nickname}
             </p>
           )}
+        </>
+      )}
+
+      {/* 게임 종료 최소 오버레이 — 승리 팀 텍스트까지만. 전원 역할 공개 전체 화면은 Task 013 소관.
+          닫아도 winner는 유지되어 투표 패널은 다시 나타나지 않는다(종료 상태 고정). */}
+      {winner && (
+        <>
+          <Dialog open={resultOpen} onOpenChange={setResultOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>게임 종료</DialogTitle>
+              </DialogHeader>
+              <p className="py-4 text-center text-xl font-bold">{WINNER_LABELS[winner]}</p>
+            </DialogContent>
+          </Dialog>
+          <p className="text-center text-lg font-semibold text-muted-foreground">
+            게임이 종료되었습니다 — {WINNER_LABELS[winner]}
+          </p>
         </>
       )}
     </section>
