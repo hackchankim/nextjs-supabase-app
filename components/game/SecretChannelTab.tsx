@@ -12,12 +12,18 @@ interface SecretChannelTabProps {
   membership: SecretChannelMembership;
   messages: GameMessage[];
   currentPlayerId: string;
+  /** 페이즈(낮/밤) 등 외부 사정으로 강제 비활성화할지 여부 — 실제 전송 자격은 서버가 최종 검증 */
+  disabled?: boolean;
+  /** 전송 버튼 클릭 시 호출 */
+  onSend?: (text: string) => void;
 }
 
 export function SecretChannelTab({
   membership,
   messages,
   currentPlayerId,
+  disabled,
+  onSend,
 }: SecretChannelTabProps) {
   // membership에 따라 데이터만 결정 — 레이아웃/라벨은 항상 동일하게 유지
   const isMember = membership !== "none";
@@ -36,7 +42,8 @@ export function SecretChannelTab({
         <ChatPanel
           messages={panelMessages}
           currentPlayerId={currentPlayerId}
-          disabled={!isMember}
+          disabled={!isMember || disabled}
+          onSend={onSend}
           placeholder={placeholder}
         />
       </CardContent>

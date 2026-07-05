@@ -63,6 +63,8 @@ export interface GameMessage {
   content: string;
   channel: ChatChannel;
   createdAt: string;
+  /** 발신자 닉네임 (UI 표시용, 선택값 — 서버 실데이터 연결 시 채워진다) */
+  senderNickname?: string;
 }
 
 /** 낮 투표 */

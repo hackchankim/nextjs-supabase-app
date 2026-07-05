@@ -12,6 +12,11 @@ interface UseGameSessionResult {
   player: SessionPlayer | null;
   /** 세션 복원(검증) 진행 중 여부 */
   loading: boolean;
+  /**
+   * localStorage에 저장된 원본 세션 토큰. Server Action(getMyRole/sendMessage/getMessages 등)
+   * 호출 시 필요하다. player가 null이면 항상 null.
+   */
+  sessionToken: string | null;
   /** 세션 토큰을 저장한다 */
   setSession: (token: string) => void;
   /** 세션 토큰을 제거한다 */
@@ -24,6 +29,7 @@ interface UseGameSessionResult {
  */
 export function useGameSession(): UseGameSessionResult {
   const [player, setPlayer] = useState<SessionPlayer | null>(null);
+  const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -42,6 +48,7 @@ export function useGameSession(): UseGameSessionResult {
 
         if (result) {
           setPlayer(result);
+          setSessionToken(token);
         } else {
           // 유효하지 않은 토큰은 정리한다
           window.localStorage.removeItem(SESSION_STORAGE_KEY);
@@ -58,12 +65,14 @@ export function useGameSession(): UseGameSessionResult {
 
   const setSession = useCallback((token: string) => {
     window.localStorage.setItem(SESSION_STORAGE_KEY, token);
+    setSessionToken(token);
   }, []);
 
   const clearSession = useCallback(() => {
     window.localStorage.removeItem(SESSION_STORAGE_KEY);
     setPlayer(null);
+    setSessionToken(null);
   }, []);
 
-  return { player, loading, setSession, clearSession };
+  return { player, loading, sessionToken, setSession, clearSession };
 }

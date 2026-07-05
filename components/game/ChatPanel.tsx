@@ -59,6 +59,7 @@ export function ChatPanel({
                 key={message.id}
                 message={message}
                 isOwn={message.playerId === currentPlayerId}
+                senderNickname={message.senderNickname}
               />
             ))
           )}

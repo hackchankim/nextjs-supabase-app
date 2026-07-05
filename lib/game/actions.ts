@@ -1,12 +1,29 @@
 "use server";
 
 import { createAdminClient } from "@/lib/supabase/admin";
-import { broadcastToRoom } from "@/lib/game/broadcast";
-import { GAME_EVENTS } from "@/lib/game/realtime";
-import { getRoleDistribution, distributionToRoleList } from "@/lib/game/utils";
+import { broadcastToRoom, broadcastToTopic } from "@/lib/game/broadcast";
+import { computeInboxToken } from "@/lib/game/inbox";
+import { GAME_EVENTS, inboxChannel, type ChatMessagePayload } from "@/lib/game/realtime";
+import { getRoleDistribution, distributionToRoleList, isCouncil, isHeretic } from "@/lib/game/utils";
 import { MIN_PLAYERS, MAX_PLAYERS } from "@/lib/game/constants";
-import type { GameStatus, PlayerRole } from "@/lib/game/types";
+import type { ChatChannel, GameStatus, PlayerRole } from "@/lib/game/types";
 import type { GameRoomRow } from "@/lib/types/database.types";
+
+/** 채팅 메시지 최대 길이 */
+const MESSAGE_MAX_LENGTH = 500;
+
+/**
+ * UUID v4 형식 검증용 정규식.
+ * recipientId를 PostgREST raw 필터(.or 문자열)에 넣기 전 반드시 이 검증을 통과시켜야 한다 —
+ * 미검증 문자열을 .or()에 삽입하면 필터 경계(쉼표·괄호)를 깨고 제3자 DM을 열람하는
+ * 인젝션이 가능하다(supabase-js는 .or 인자를 이스케이프하지 않음).
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** 낮에만 활성화되는 채널 (밤에는 비활성) */
+const DAY_ONLY_CHANNELS: readonly ChatChannel[] = ["public", "dm"];
+/** 밤에만 활성화되는 비밀 채널 (낮에는 비활성) */
+const NIGHT_ONLY_CHANNELS: readonly ChatChannel[] = ["heretic", "council"];
 
 /** 닉네임 최소/최대 길이 */
 const NICKNAME_MIN_LENGTH = 1;
@@ -342,4 +359,319 @@ export async function startGame(roomId: string, pin: string): Promise<StartGameR
       error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
     };
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 채팅 (Task 010)
+// ─────────────────────────────────────────────────────────────────────────
+
+type AdminClient = ReturnType<typeof createAdminClient>;
+
+/** 세션 토큰 검증용 내부 컨텍스트 — role을 포함하므로 이 파일 밖으로 절대 반환하지 않는다. */
+interface SenderContext {
+  id: string;
+  nickname: string;
+  roomId: string;
+  role: PlayerRole | null;
+  isAlive: boolean;
+}
+
+/**
+ * 세션 토큰으로 발신자 컨텍스트(role 포함)를 내부용으로 조회한다.
+ * 이 함수의 반환값은 클라이언트로 그대로 전달하면 안 된다 — role이 포함되어 있다.
+ */
+async function getSenderContext(
+  supabase: AdminClient,
+  token: string,
+): Promise<SenderContext | null> {
+  const { data: player, error } = await supabase
+    .from("game_players")
+    .select("id, nickname, room_id, role, is_alive")
+    .eq("session_token", token)
+    .maybeSingle();
+
+  if (error || !player) {
+    return null;
+  }
+
+  return {
+    id: player.id,
+    nickname: player.nickname,
+    roomId: player.room_id,
+    role: player.role as PlayerRole | null,
+    isAlive: player.is_alive,
+  };
+}
+
+/**
+ * 세션 토큰으로 본인 role만 조회한다. 남의 역할은 이 함수로 절대 조회할 수 없다
+ * (game_players.session_token으로 본인 1건만 조회하는 구조 자체가 격리를 강제한다).
+ */
+export async function getMyRole(token: string): Promise<{ role: PlayerRole | null } | null> {
+  const supabase = createAdminClient();
+  const sender = await getSenderContext(supabase, token);
+  return sender ? { role: sender.role } : null;
+}
+
+/**
+ * 세션 토큰으로 본인의 개인 인박스 Broadcast 채널명을 조회한다.
+ * inboxToken 자체는 HMAC 결과라 역산이 불가능하므로 이 채널명은 클라이언트에 노출해도 안전하다.
+ */
+export async function getMyInboxTopic(token: string): Promise<string | null> {
+  const supabase = createAdminClient();
+  const sender = await getSenderContext(supabase, token);
+  if (!sender) return null;
+  return inboxChannel(sender.roomId, computeInboxToken(sender.id));
+}
+
+/**
+ * 채팅 메시지를 수신 자격이 있는 참가자에게만 fan-out한다.
+ * - public/system: 공개 room 채널 1회
+ * - heretic/council: 같은 방의 해당 역할군 전원의 개인 인박스
+ * - dm: 발신자·수신자 두 사람의 개인 인박스
+ * 실패해도 throw하지 않는다(broadcastToRoom/broadcastToTopic이 이미 부가 기능으로 처리).
+ */
+async function fanOutMessage(
+  supabase: AdminClient,
+  roomId: string,
+  channel: ChatChannel,
+  payload: ChatMessagePayload,
+  senderId: string,
+  recipientId: string | undefined,
+): Promise<void> {
+  if (channel === "public" || channel === "system") {
+    await broadcastToRoom(roomId, GAME_EVENTS.CHAT_MESSAGE, payload);
+    return;
+  }
+
+  if (channel === "heretic" || channel === "council") {
+    const { data: players } = await supabase
+      .from("game_players")
+      .select("id, role")
+      .eq("room_id", roomId);
+
+    const memberIds = (players ?? [])
+      .filter((p) => {
+        const role = p.role as PlayerRole | null;
+        return channel === "heretic" ? isHeretic(role) : isCouncil(role);
+      })
+      .map((p) => p.id);
+
+    await Promise.all(
+      memberIds.map((id) =>
+        broadcastToTopic(inboxChannel(roomId, computeInboxToken(id)), GAME_EVENTS.CHAT_MESSAGE, payload),
+      ),
+    );
+    return;
+  }
+
+  if (channel === "dm" && recipientId) {
+    const recipientIds = Array.from(new Set([senderId, recipientId]));
+    await Promise.all(
+      recipientIds.map((id) =>
+        broadcastToTopic(inboxChannel(roomId, computeInboxToken(id)), GAME_EVENTS.CHAT_MESSAGE, payload),
+      ),
+    );
+  }
+}
+
+type SendMessageResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * 채팅 메시지를 전송한다 — 서버가 페이즈·채널·역할 권한을 최종 검증하는 최후 방어선이다.
+ * 무차별 UI(비밀 채널 탭은 전원 노출)는 클라이언트 표현일 뿐, 실제 열람/전송 자격은
+ * 항상 이 함수(및 getMessages)가 role/is_alive/room_id 기준으로 강제한다.
+ */
+export async function sendMessage(
+  token: string,
+  channel: ChatChannel,
+  text: string,
+  recipientId?: string,
+): Promise<SendMessageResult> {
+  try {
+    const supabase = createAdminClient();
+    const sender = await getSenderContext(supabase, token);
+
+    if (!sender) {
+      return { ok: false, error: "세션이 유효하지 않습니다" };
+    }
+
+    const trimmed = text.trim();
+    if (trimmed.length === 0) {
+      return { ok: false, error: "메시지를 입력해주세요" };
+    }
+    if (trimmed.length > MESSAGE_MAX_LENGTH) {
+      return { ok: false, error: `메시지는 ${MESSAGE_MAX_LENGTH}자 이하로 입력해주세요` };
+    }
+
+    // 시스템 메시지는 서버 내부 전용 — 클라이언트가 이 액션으로 보낼 수 없다.
+    if (channel === "system") {
+      return { ok: false, error: "시스템 채널에는 메시지를 보낼 수 없습니다" };
+    }
+
+    const { data: room, error: roomError } = await supabase
+      .from("game_rooms")
+      .select("status")
+      .eq("id", sender.roomId)
+      .maybeSingle();
+
+    if (roomError || !room) {
+      return { ok: false, error: "게임 방을 찾을 수 없습니다" };
+    }
+
+    // 페이즈 게이팅 — 서버가 최종 권위. public/dm은 낮에만, heretic/council은 밤에만 활성.
+    if (DAY_ONLY_CHANNELS.includes(channel) && room.status !== "day") {
+      return { ok: false, error: "낮에만 보낼 수 있는 채널입니다" };
+    }
+    if (NIGHT_ONLY_CHANNELS.includes(channel) && room.status !== "night") {
+      return { ok: false, error: "밤에만 보낼 수 있는 채널입니다" };
+    }
+
+    if (!sender.isAlive) {
+      return { ok: false, error: "탈락한 참가자는 채팅을 보낼 수 없습니다" };
+    }
+
+    // 채널 역할 권한 — heretic은 이단 팀만, council은 당회만.
+    if (channel === "heretic" && !isHeretic(sender.role)) {
+      return { ok: false, error: "권한이 없습니다" };
+    }
+    if (channel === "council" && !isCouncil(sender.role)) {
+      return { ok: false, error: "권한이 없습니다" };
+    }
+
+    if (channel === "dm") {
+      if (!recipientId || !UUID_RE.test(recipientId) || recipientId === sender.id) {
+        return { ok: false, error: "귓속말 대상을 확인해주세요" };
+      }
+
+      const { data: recipient, error: recipientError } = await supabase
+        .from("game_players")
+        .select("id, room_id, is_alive")
+        .eq("id", recipientId)
+        .maybeSingle();
+
+      if (
+        recipientError ||
+        !recipient ||
+        recipient.room_id !== sender.roomId ||
+        !recipient.is_alive
+      ) {
+        return { ok: false, error: "귓속말 대상을 확인해주세요" };
+      }
+    }
+
+    const { data: inserted, error: insertError } = await supabase
+      .from("game_messages")
+      .insert({
+        room_id: sender.roomId,
+        player_id: sender.id,
+        channel,
+        content: trimmed,
+        recipient_id: channel === "dm" ? recipientId! : null,
+      })
+      .select("id, created_at")
+      .single();
+
+    if (insertError || !inserted) {
+      return {
+        ok: false,
+        error: `메시지 전송 실패: ${insertError?.message ?? "알 수 없는 오류"}`,
+      };
+    }
+
+    const payload: ChatMessagePayload = {
+      id: inserted.id,
+      channel,
+      senderId: sender.id,
+      senderNickname: sender.nickname,
+      text: trimmed,
+      recipientId: channel === "dm" ? recipientId! : null,
+      createdAt: inserted.created_at,
+    };
+
+    // 수신 자격이 있는 참가자에게만 fan-out (발신자 본인도 멤버/수신자로 포함되어 echo를 받는다).
+    await fanOutMessage(supabase, sender.roomId, channel, payload, sender.id, recipientId);
+
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
+  }
+}
+
+/**
+ * 채널의 메시지 목록을 조회한다 — 서버가 자격을 검증한 뒤 자격이 없으면 빈 배열을 반환한다
+ * (탭 자체는 전원 노출되지만 실제 데이터는 이 함수가 role/room_id 기준으로 격리한다).
+ * role은 절대 반환값에 포함하지 않는다.
+ */
+export async function getMessages(
+  token: string,
+  channel: ChatChannel,
+  recipientId?: string,
+): Promise<ChatMessagePayload[]> {
+  const supabase = createAdminClient();
+  const sender = await getSenderContext(supabase, token);
+
+  if (!sender) {
+    return [];
+  }
+
+  // 채널별 자격 검증 — 자격이 없으면 조용히 빈 배열 (탭 유무는 분기하지 않되 데이터는 격리).
+  if (channel === "heretic" && !isHeretic(sender.role)) {
+    return [];
+  }
+  if (channel === "council" && !isCouncil(sender.role)) {
+    return [];
+  }
+
+  let query = supabase
+    .from("game_messages")
+    .select("id, channel, content, created_at, player_id, recipient_id")
+    .eq("room_id", sender.roomId)
+    .eq("channel", channel);
+
+  if (channel === "dm") {
+    // recipientId는 raw .or() 필터에 삽입되므로 UUID 형식을 강제해 인젝션을 원천 차단한다.
+    // (형식이 어긋나면 조용히 빈 배열 — 잘못된/악의적 대상 지정으로 간주)
+    if (recipientId && !UUID_RE.test(recipientId)) {
+      return [];
+    }
+    // dm은 발신자==caller 또는 수신자==caller인 행만 — recipientId 지정 시 caller↔recipientId로 한정.
+    query = recipientId
+      ? query.or(
+          `and(player_id.eq.${sender.id},recipient_id.eq.${recipientId}),and(player_id.eq.${recipientId},recipient_id.eq.${sender.id})`,
+        )
+      : query.or(`player_id.eq.${sender.id},recipient_id.eq.${sender.id}`);
+  }
+
+  const { data: rows, error } = await query.order("created_at", { ascending: true });
+
+  if (error || !rows || rows.length === 0) {
+    return [];
+  }
+
+  const senderIds = Array.from(
+    new Set(rows.map((row) => row.player_id).filter((id): id is string => id !== null)),
+  );
+
+  const nicknameById = new Map<string, string>();
+  if (senderIds.length > 0) {
+    const { data: senders } = await supabase
+      .from("game_players")
+      .select("id, nickname")
+      .in("id", senderIds);
+    (senders ?? []).forEach((s) => nicknameById.set(s.id, s.nickname));
+  }
+
+  return rows.map((row) => ({
+    id: row.id,
+    channel: row.channel as ChatChannel,
+    senderId: row.player_id,
+    senderNickname: row.player_id ? (nicknameById.get(row.player_id) ?? "알 수 없음") : "시스템",
+    text: row.content,
+    recipientId: row.recipient_id,
+    createdAt: row.created_at,
+  }));
 }
