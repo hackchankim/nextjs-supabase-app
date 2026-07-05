@@ -300,26 +300,27 @@
   - [x] 밤 페이즈에 전체 채팅 입력창이 비활성화되는가
   - [x] 시스템 메시지가 일반 채팅과 다른 스타일로 표시되는가 _(중앙 pill, role="status")_
 
-- **Task 011: 낮 투표 시스템 구현**
-  - 투표 Server Action: game_votes UPSERT (1인 1표, 변경 가능)
-  - `lib/game/hooks/useGameVotes.ts` — 투표 현황 실시간 구독
-  - 살아있는 플레이어 목록 기반 VoteButton 렌더링
-  - 자신에게 투표 불가 처리
-  - 진행자 투표 마감 Server Action
-    - 최다 득표자 산출 (동률 시 진행자 수동 선택 모달)
-    - game_players is_alive → false
-    - 시스템 메시지 발송 ("○○님이 공동체를 떠났습니다")
-    - 승리 조건 체크 실행
-  - 투표 조기 종료 (F018): 생존자 수 == 고유 투표자 수이면 진행자 대시보드에 "전원 투표 완료" 표시 + [조기 종료] 버튼 활성화 (즉시 마감 Server Action 호출)
-  - 진행자 대시보드 실시간 투표 집계 + 투표 진행률("n/생존자수") 표시
+- **Task 011: 낮 투표 시스템 구현** ✅ - 완료 (auto-dev · Broadcast 집계)
+  - ✅ 투표 Server Action `castVote(token, targetId)` — game_votes UPSERT(1인 1표, onConflict room_id,phase_number,voter_id로 변경 가능). 낮·생존 투표자·대상 생존/같은방/자기자신 불가를 **서버가 최종 검증**
+  - ✅ `lib/game/hooks/useGameVotes.ts` — `getVoteState` 스냅샷 + 공개 room 채널 `VOTE_UPDATE` Broadcast 구독(집계 델타). Postgres Changes 미사용
+  - ✅ 살아있는 플레이어 기반 VoteButton 렌더링(자신 제외) + 내 투표 하이라이트 + 대상별 득표수 표시
+  - ✅ 진행자 투표 마감 Server Action `closeVoting(roomId, pin)` — **PIN 재검증 + 낮 상태 가드**
+    - 최다 득표자 산출, 동률(≥2) 시 후보 반환 → 진행자 수동 선택 모달 → `resolveVoteElimination(roomId, pin, targetId)`(후보 재검증)
+    - ✅ 공유 헬퍼 `resolveElimination`(is_alive→false, **is_alive=true 가드로 중복 마감 멱등화**, 시스템 메시지 발송+`PLAYER_ELIMINATED` broadcast) / `evaluateWinner`(`checkWinner`→ended+winner+`GAME_ENDED` broadcast) — **Task 012/013이 재사용**
+  - ✅ 투표 조기 종료 (F018): `voterCount==aliveCount`일 때만 진행자 [조기 종료] 활성
+  - ✅ 진행자 대시보드 실시간 집계 + 진행률("n/생존자수") + 종료 후 버튼 비활성. play 화면 본인 탈락 즉시 반영(selfAlive) + 종료 상태 고정(winner/resultOpen 분리)으로 종료 후 투표 패널 은닉
+  - ✅ **보안 수정**: `game_votes.anon SELECT using(true)` 정책이 개별 투표(voter→target)를 anon에 직접 노출하던 결함(admin_pin과 동일 유형)을 마이그레이션 `0003_restrict_game_votes.sql`(정책 제거 + anon SELECT revoke)로 프로덕션 차단. code-reviewer 발견 → **사용자 승인(비밀 투표)** 후 적용·검증
+  - ✅ **정합성**: Broadcast(VOTE_UPDATE/PLAYER_ELIMINATED/GAME_ENDED)·Server Action 응답에 개별 voter→target 매핑·role·session_token 미포함(집계 count만)
+  - ⚠️ **후속 백로그**: play 페이지 3중 room 채널 구독 통합(useGameChat/useGameVotes/탈락구독), phase 전환 실시간 동기화(Task 013)
 
   ### 테스트 체크리스트
-  - [ ] 투표 후 다른 참가자로 변경 투표가 가능한가 (1인 1표 유지)
-  - [ ] 진행자 화면에 실시간 투표 집계와 진행률이 표시되는가
-  - [ ] 생존자 전원이 투표하면 [조기 종료] 버튼이 활성화되는가
-  - [ ] 투표 마감 후 최다 득표자가 탈락 처리되는가
-  - [ ] 탈락 처리 후 해당 플레이어의 투표 버튼이 비활성화되는가
-  - [ ] 동률 시 진행자 수동 선택 모달이 표시되는가
+  - [x] 투표 후 다른 참가자로 변경 투표가 가능한가 (1인 1표 유지) _(SQL: voter 행 1건 유지)_
+  - [x] 진행자 화면에 실시간 투표 집계와 진행률이 표시되는가
+  - [x] 생존자 전원이 투표하면 [조기 종료] 버튼이 활성화되는가
+  - [x] 투표 마감 후 최다 득표자가 탈락 처리되는가 _(is_alive=false + 시스템 메시지)_
+  - [x] 탈락 처리 후 해당 플레이어의 투표 버튼이 비활성화되는가 _(본인 탈락 즉시 반영)_
+  - [x] 동률 시 진행자 수동 선택 모달이 표시되는가
+  - [x] 개별 투표가 anon 직접조회/broadcast 프레임에 노출되지 않는가 _(REST 401 + 원시 WebSocket 프레임 실증)_
 
 - **Task 012: 밤 행동 시스템 구현**
   - 밤 행동 Server Action: game_night_actions UPSERT (권한 검증 — 권한 없는 역할 요청은 거부/no-op)
