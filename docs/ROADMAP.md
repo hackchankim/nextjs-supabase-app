@@ -126,18 +126,19 @@
 
 ---
 
-### Phase 1: 애플리케이션 골격 구축
+### Phase 1: 애플리케이션 골격 구축 ✅
 
-- **Task 001: 게임 라우트 구조 및 빈 페이지 생성** - 우선순위
-  - `app/game/layout.tsx` — 게임 영역 공통 레이아웃 생성
-  - `app/game/page.tsx` — 입장 허브 빈 페이지 (F001, F002)
-  - `app/game/waiting/page.tsx` — 대기실 빈 페이지 (F003, F004, F019, F020)
-  - `app/game/play/page.tsx` — 게임 플레이 빈 페이지 (F005~F011, F014~F017)
-  - `app/game/admin/page.tsx` — 진행자 대시보드 빈 페이지 (F004, F006, F009, F011~F014, F017~F020)
-  - 각 페이지에 제목과 라우트 확인용 최소 마크업 삽입
+- **Task 001: 게임 라우트 구조 및 빈 페이지 생성** ✅ - 완료 (auto-dev · PR `auto/game-routes-scaffold`)
+  - ✅ `app/game/layout.tsx` — 게임 영역 공통 레이아웃 생성
+  - ✅ `app/game/page.tsx` — 입장 허브 빈 페이지 (F001, F002)
+  - ✅ `app/game/waiting/page.tsx` — 대기실 빈 페이지 (F003, F004, F019, F020)
+  - ✅ `app/game/play/page.tsx` — 게임 플레이 빈 페이지 (F005~F011, F014~F017)
+  - ✅ `app/game/admin/page.tsx` — 진행자 대시보드 빈 페이지 (F004, F006, F009, F011~F014, F017~F020)
+  - ✅ 각 페이지에 제목과 라우트 확인용 최소 마크업 삽입
+  - ✅ `lib/supabase/proxy.ts` — `/game` 하위를 인증 예외(공개)로 추가 _(QA가 로그인 리다이렉트 결함을 잡아 수정 · 게임은 로그인 없이 닉네임 입장 F001)_
 
-- **Task 002: 게임 타입 정의 및 상수 설계**
-  - `lib/game/types.ts` — 핵심 TypeScript 타입 정의
+- **Task 002: 게임 타입 정의 및 상수 설계** ✅ - 완료 (auto-dev)
+  - ✅ `lib/game/types.ts` — 핵심 TypeScript 타입 정의
     - `GameRoom`, `GamePlayer`, `GameMessage`, `GameVote`, `GameNightAction`
     - `PlayerRole`: `'saint' | 'heretic' | 'heretic_leader' | 'pastor' | 'elder' | 'deaconess'`
     - `GameStatus`: `'waiting' | 'day' | 'night' | 'ended'`
@@ -150,8 +151,8 @@
   - `lib/game/constants.ts` — 역할 한글 표시명(목사님·장로님·권사님·이단·이단 대장·성도), 팀 분류, 당회 그룹(목사님+장로님) 정의, 인원별 역할 배분표
   - `lib/game/utils.ts` — 역할 배분 계산 함수, 당회/이단 그룹 판별 함수, 승리 조건 체크 함수 시그니처
 
-- **Task 003: Supabase DB 스키마 마이그레이션**
-  - `supabase/migrations/xxx_game_schema.sql` 작성 및 적용
+- **Task 003: Supabase DB 스키마 마이그레이션** ✅ - 완료 (auto-dev · 프로덕션 적용)
+  - ✅ `supabase/migrations/0001_game_schema.sql` 작성 및 적용 (5테이블 + RLS 서버계층 모델 · `database.types.ts` 재생성)
   - 5개 테이블 생성: `game_rooms`, `game_players`, `game_messages`, `game_votes`, `game_night_actions`
     - `game_rooms`: `transition_to`(null/day/night), `transition_at`(timestamptz, nullable) 컬럼 포함
     - `game_messages`: `recipient_id`(→ game_players.id, nullable), `channel`(public/heretic/council/dm/system) 포함
@@ -167,107 +168,103 @@
 
 ---
 
-### Phase 2: UI/UX 완성 (더미 데이터 활용)
+### Phase 2: UI/UX 완성 (더미 데이터 활용) ✅
 
-- **Task 004: 게임 전용 공통 컴포넌트 구축**
-  - shadcn/ui 추가 컴포넌트 설치
-    ```bash
-    npx shadcn@latest add dialog tabs avatar scroll-area sonner separator
-    ```
-  - 게임 공통 컴포넌트 구현 (`components/game/`)
-    - `PlayerCard.tsx` — 닉네임 + 생존/탈락 배지 카드
-    - `RoleCard.tsx` — 역할 공개 카드 (이름, 설명) — 모든 역할 동일 구조, 역할별 색상 차등 금지(무차별 UI)
-    - `PhaseBanner.tsx` — 낮/밤 페이즈 + 라운드 번호 배너 + 전환 카운트다운 표시 영역
-    - `ChatBubble.tsx` — 메시지 말풍선 (본인/타인/시스템 구분)
-    - `ChatPanel.tsx` — 전체/비밀/1:1 공용 채팅 패널 (ScrollArea + ChatBubble + 입력창)
-    - `SecretChannelTab.tsx` — 전원 동일 노출 "비밀 채널" 탭, 멤버십(이단/당회/개인)에 따라 내용만 분기
-    - `DirectMessageTab.tsx` — 상대 지정 1:1 귓속말 탭 (대상 선택 드롭다운 + ChatPanel)
-    - `VoteButton.tsx` — 투표 대상 선택 버튼
-    - `ActionPanel.tsx` — 밤 행동 패널 래퍼 — 전원 동일 형태의 대상 선택 UI(권한 없는 역할은 no-op)
-  - 무차별 UI 원칙: 중립 테마(역할별 색상/배지 금지), 동일 탭 구성을 컴포넌트 레벨에서 보장
-  - `lib/game/dummy.ts` — 더미 데이터 (참가자 목록, 채팅 메시지[public/heretic/council/dm], 투표 현황)
+- **Task 004: 게임 전용 공통 컴포넌트 구축** ✅ - 완료 (auto-dev)
+  - ✅ shadcn/ui 추가 컴포넌트 설치 (dialog tabs avatar scroll-area sonner separator)
+  - ✅ 게임 공통 컴포넌트 구현 (`components/game/`)
+    - ✅ `PlayerCard.tsx` — 닉네임 + 생존/탈락 배지 카드
+    - ✅ `RoleCard.tsx` — 역할 공개 카드 (이름, 설명) — 모든 역할 동일 구조, 역할별 색상 차등 금지(무차별 UI)
+    - ✅ `PhaseBanner.tsx` — 낮/밤 페이즈 + 라운드 번호 배너 + 전환 카운트다운 표시 영역
+    - ✅ `ChatBubble.tsx` — 메시지 말풍선 (본인/타인/시스템 구분)
+    - ✅ `ChatPanel.tsx` — 전체/비밀/1:1 공용 채팅 패널 (ScrollArea + ChatBubble + 입력창, 신규 메시지 자동 하단 스크롤)
+    - ✅ `SecretChannelTab.tsx` — 전원 동일 노출 "비밀 채널" 탭, 멤버십(이단/당회/개인)에 따라 내용만 분기
+    - ✅ `DirectMessageTab.tsx` — 상대 지정 1:1 귓속말 탭 (대상 선택 버튼 그룹 + ChatPanel)
+    - ✅ `VoteButton.tsx` — 투표 대상 선택 버튼
+    - ✅ `ActionPanel.tsx` — 밤 행동 패널 래퍼 — 전원 동일 형태의 대상 선택 UI(권한 없는 역할은 no-op)
+  - ✅ 무차별 UI 원칙: 중립 테마(역할별 색상/배지 금지), 동일 탭 구성을 컴포넌트 레벨에서 보장 (code-reviewer 정적 검증 + qa-tester 렌더 검증 통과)
+  - ✅ `lib/game/dummy.ts` — 더미 데이터 (참가자 10명, 채팅 메시지[public/heretic/council/dm/system], 투표 현황)
 
-- **Task 005: 입장 허브 & 대기실 페이지 UI 구현**
-  - 입장 허브 페이지 (`app/game/page.tsx`)
-    - 교회 테마 게임 로고 및 제목
-    - 닉네임 입력 폼 (Input + Button)
-    - "진행자로 입장" 링크 → PIN 입력 Dialog 모달
-  - 대기실 페이지 (`app/game/waiting/page.tsx`)
-    - 더미 참가자 목록 (PlayerCard 컴포넌트 사용) + 온라인/오프라인 접속 상태 배지
-    - 진행자용 [강퇴] 버튼 (참가자별, 더미 데이터로 조건부 노출)
-    - 현재 인원 / 최소 인원 표시
-    - [게임 시작] 버튼 (더미 데이터로 조건부 노출)
-    - 대기 중 안내 메시지
+- **Task 005: 입장 허브 & 대기실 페이지 UI 구현** ✅ - 완료 (auto-dev)
+  - ✅ 입장 허브 페이지 (`app/game/page.tsx`)
+    - ✅ 교회 테마 게임 로고 및 제목
+    - ✅ 닉네임 입력 폼 (Input + Button)
+    - ✅ "진행자로 입장" 링크 → PIN 입력 Dialog 모달
+  - ✅ 대기실 페이지 (`app/game/waiting/page.tsx`)
+    - ✅ 더미 참가자 목록 (PlayerCard 컴포넌트 사용, 대기실은 게임 시작 전이라 생존/탈락 배지 숨김 `showAliveStatus={false}`) + 온라인/오프라인 접속 상태 배지
+    - ✅ 진행자용 [강퇴]·[게임 시작] 버튼은 진행자 시점에서만 노출 (개발용 진행자/참가자 시점 토글은 `NODE_ENV` 가드로 프로덕션 빌드에서 자동 제거, 실제 판정은 Phase 3 PIN 세션)
+    - ✅ 현재 인원 / 최소 인원 표시
+    - ✅ [게임 시작] 버튼 (더미 데이터로 조건부 노출)
+    - ✅ 대기 중 안내 메시지 (code-reviewer 정적 검증 + qa-tester 렌더/인터랙션 검증 통과)
 
-- **Task 006: 게임 플레이 페이지 UI 구현 (역할 무차별 UI)**
-  - 역할 카드 모달 (Dialog) — 애니메이션 공개 + 탭하면 닫힘, 모든 역할 동일 레이아웃
-  - 상단: PhaseBanner (낮/밤 + 라운드 + 전환 시 10초 카운트다운)
-  - 좌측/하단: 생존 현황 플레이어 목록 (PlayerCard)
-  - 중앙: 채팅 탭 UI — **전원 동일한 탭 구성**(전체 / 비밀 채널 / 1:1)
-    - [전체 채팅] 탭 — ScrollArea + ChatBubble + 입력창
-    - [비밀 채널] 탭 — 전원에게 동일하게 노출, 멤버십에 따라 내용만 분기(이단 채팅 / 당회 채팅 / 개인 기도 메모 플레이스홀더), 색상 테마는 중립 통일
-    - [1:1 채팅] 탭 — 상대 지정 귓속말, 낮 페이즈·생존자만 입력 활성
-  - 하단: 행동 패널 — **페이즈만으로 분기, 역할로 외형 분기 금지**
-    - 낮 투표: 살아있는 플레이어 VoteButton 목록
-    - 밤: 전원 동일한 "대상 선택" 패널 노출. 실제 동작은 권한자만 (이단 대장: 제거 / 목사님: 조사 / 권사님: 보호 / 그 외(성도·일반 이단·장로님): 외형 동일한 no-op 대기 패널)
-  - 게임 종료 결과 오버레이 (승리 팀 발표)
-  - 무차별 UI 검증: 서로 다른 역할 2명 화면 비교 시 외형 차이가 없어야 함
+- **Task 006: 게임 플레이 페이지 UI 구현 (역할 무차별 UI)** ✅ - 완료 (auto-dev)
+  - ✅ 역할 카드 모달 (Dialog) — "내 역할 보기" 버튼(고정 텍스트) + RoleCard, 모든 역할 동일 레이아웃
+  - ✅ 상단: PhaseBanner (낮/밤 + 라운드 표시, 카운트다운 표시 영역은 컴포넌트에 마련됨)
+  - ✅ 생존 현황: 팀별 인원 집계("공동체 N명 · 이단 M명 생존", 개별 역할 비노출) + 콤팩트 참가자 칩 (사용자 리뷰 반영: 공간 절약·팀 집계 표기)
+  - ✅ 데모 컨트롤(역할 표시)은 `process.env.NODE_ENV === "development"` 가드로 프로덕션 빌드에서 자동 제거 (참가자에게 역할 노출 방지)
+  - ✅ 중앙: 채팅 탭 UI — **전원 동일한 탭 구성**(전체 / 비밀 채널 / 1:1)
+    - ✅ [전체 채팅] 탭 — ChatPanel(ScrollArea + ChatBubble + 입력창)
+    - ✅ [비밀 채널] 탭 — SecretChannelTab, 전원 동일 노출·멤버십(이단/당회/개인)에 따라 내용만 분기
+    - ✅ [1:1 채팅] 탭 — DirectMessageTab, 낮 페이즈·생존자만 입력 활성
+  - ✅ 하단: 행동 패널 — **페이즈만으로 분기, 역할로 외형 분기 금지**
+    - ✅ 낮 투표: VoteButton 목록 (생존자·자신 제외)
+    - ✅ 밤: ActionPanel — actionLabel을 역할과 무관하게 "밤 행동"으로 고정, canAct(boolean)만으로 활성화 결정(code-reviewer가 탈락자 밤 행동 가능 버그 발견 → `canPerformNightAction(role, isAlive)` 유틸 추가로 수정)
+  - ✅ 게임 종료 결과 오버레이 (승리 팀 발표 + 전원 역할 공개)
+  - ✅ 무차별 UI 검증: qa-tester가 서로 다른 역할(이단 대장/성도) 시점 전환 후 밤 행동 패널 스크린샷 비교로 외형 동일함 확인, 탈락자 행동 불가도 실브라우저 검증
 
-- **Task 007: 진행자 대시보드 UI 구현**
-  - Tabs 컴포넌트로 2개 탭 분리
-  - [스크린 탭] — 빔프로젝터 공개 화면
-    - 닉네임 + 생존/탈락만 표시 (역할 비공개)
-    - 현재 페이즈 + 라운드 배너 + 전환 카운트다운 표시
-    - 실시간 투표 집계 Progress 바
-  - [제어 탭] — 진행자 개인 폰용
-    - 닉네임 + 역할 + 생존 여부 + 접속 상태(온라인/오프라인 배지) 전체 표 (더미 데이터)
-    - 수동 탈락 처리 버튼
-    - 참가자 [강퇴/제거] 버튼 (게임 중=탈락 처리)
-    - 페이즈 전환 버튼 (낮 → 밤 / 밤 → 낮) → 10초 카운트다운 시작 + 카운트다운 중 [전환 취소] 버튼
-    - 투표 마감 버튼 + 생존자 전원 투표 완료 시 활성화되는 [투표 조기 종료] 버튼 (투표 진행률 "n/생존자수" 표시)
-    - 밤 행동 완료 현황 체크 리스트
-    - 시스템 메시지 발송 입력창
-    - 게임 종료 / 리셋 버튼
-  - 모바일 최적화 레이아웃 검증
+- **Task 007: 진행자 대시보드 UI 구현** ✅ - 완료 (auto-dev)
+  - ✅ Tabs 컴포넌트로 2개 탭 분리 (스크린/제어)
+  - ✅ [스크린 탭] — 빔프로젝터 공개 화면
+    - ✅ 닉네임 + 생존/탈락만 표시 (역할 비공개 — PlayerCard 재사용으로 구조적 보장, qa-tester가 텍스트 스캔으로 실증)
+    - ✅ 현재 페이즈 + 라운드 배너 (PhaseBanner, 전환 표시 영역 포함)
+    - ✅ 투표 집계 Progress 바 + "n/생존자수" 텍스트 (shadcn Progress 신규 설치)
+  - ✅ [제어 탭] — 진행자 개인 폰용
+    - ✅ 닉네임 + 역할 + 생존 여부 + 접속 상태(온라인/오프라인 배지) 전체 표 (더미 데이터)
+    - ✅ 탈락/부활 처리 토글 버튼
+    - ✅ 참가자 [강퇴] 버튼 (탈락 처리 + 접속 상태 오프라인)
+    - ✅ 페이즈 전환 버튼(낮⇄밤 예약) + 전환 대기 표시 + [전환 취소] 버튼 (초단위 카운트다운은 Phase 3 Task 013에서 구현)
+    - ✅ [투표 조기 종료] 버튼 (투표수==생존자수일 때만 활성화, 진행률 "n/생존자수" 표시)
+    - ✅ 밤 행동 완료 체크리스트 (이단 대장·목사님·권사님만 나열)
+    - ✅ 시스템 메시지 입력창
+    - ✅ 게임 종료 / 리셋 버튼 (게임종료·투표마감·전송은 Phase 3 구현 예정이라 disabled+안내 title로 명시, 리셋은 데모 상태 전체 초기화로 동작)
+  - ✅ code-reviewer 정적 검증(스크린 탭 역할 노출 없음·0분모 가드) + qa-tester 11개 체크리스트 실브라우저 검증 통과
 
 ---
 
 ### Phase 3: 핵심 기능 구현
 
-- **Task 008: 닉네임 입장 및 세션 관리 구현** - 우선순위
-  - `lib/game/hooks/useGameSession.ts` — 세션 토큰 관리 훅
-    - localStorage에 `session_token` (UUID) 저장/복원
-    - `player_id` 조회 (session_token → game_players)
-    - 세션 만료/없을 때 입장 허브로 리다이렉트
-  - 입장 허브 Server Action: 닉네임 중복 체크 + game_players INSERT + 토큰 발급
-  - 진행자 PIN 검증: game_rooms admin_pin 대조
-  - 게임 상태 기반 라우팅 (waiting → play 자동 이동)
+- **Task 008: 닉네임 입장 및 세션 관리 구현** ✅ - 완료 (auto-dev · 첫 실제 Supabase 쓰기)
+  - ✅ `lib/game/hooks/useGameSession.ts` — 세션 토큰 관리 훅
+    - ✅ localStorage `game_session_token`에 UUID 저장/복원
+    - ✅ `getPlayerBySession`(Server Action)로 player 조회 (role 미반환 — 무차별 UI)
+  - ✅ `lib/supabase/admin.ts` — service_role 서버 전용 클라이언트 (`import "server-only"` 가드, Fluid compute 대응)
+  - ✅ 입장 허브 Server Action(`lib/game/actions.ts`, `"use server"`): `joinGame`(닉네임 유효성·중복 체크·game_players INSERT·토큰 발급, 동시입장 23505 처리) + `verifyAdminPin`(admin_pin 대조) — 판별 유니온 반환
+  - ✅ 게임 상태 기반 라우팅 (닉네임→`/game/waiting`, PIN 정답→`/game/admin`)
+  - ✅ **보안 수정**: `game_rooms.admin_pin`이 anon(브라우저)에 노출되던 결함(Task 003 RLS 갭)을 마이그레이션 `0002_restrict_admin_pin.sql`(테이블 SELECT 회수 + admin_pin 제외 컬럼 재부여)로 프로덕션 차단. code-reviewer 발견 → 사용자 승인(컬럼 권한 회수) 후 적용·검증
+  - ⚠️ **후속 백로그**(이번 범위 밖): `verifyAdminPin` rate-limit(4자리 PIN 무차별 대입 방어), `/game/admin` 진입 시 서버 세션/쿠키 검증, `getOrCreateActiveRoom` select→insert 레이스(이벤트 규모상 저위험)
 
   ### 테스트 체크리스트
-  - [ ] 닉네임 입력 후 localStorage에 session_token이 저장되는가
-  - [ ] 동일 닉네임 중복 입장 시 에러 메시지가 표시되는가
-  - [ ] 올바른 PIN 입력 시 진행자 대시보드로 이동하는가
-  - [ ] 잘못된 PIN 입력 시 에러 메시지가 표시되는가
-  - [ ] 브라우저 새로고침 후 세션이 복원되어 기존 상태로 돌아가는가
+  - [x] 닉네임 입력 후 localStorage에 session_token이 저장되는가 _(qa-tester: 실 DB INSERT + UUID 저장 확인)_
+  - [x] 동일 닉네임 중복 입장 시 에러 메시지가 표시되는가
+  - [x] 올바른 PIN 입력 시 진행자 대시보드로 이동하는가 _(시드 room PIN '1234')_
+  - [x] 잘못된 PIN 입력 시 에러 메시지가 표시되는가
+  - [x] 브라우저 새로고침 후 세션이 복원되어 기존 상태로 돌아가는가
 
-- **Task 009: 대기실 실시간 참가자 목록 구현**
-  - game_rooms 초기화 (없으면 자동 생성, 있으면 재사용)
-  - `app/game/waiting/page.tsx`에 Supabase Realtime 구독
-    - `game_players` INSERT 이벤트 → 참가자 목록 실시간 갱신
-  - 게임 시작 Server Action (`lib/game/actions.ts`)
-    - 현재 참가자 수 기반 역할 배분 테이블 적용
-    - 10명: 이단2 + 이단 대장1 + 목사님1 + 장로님1 + 권사님1 + 성도4
-    - 15명: 이단3 + 이단 대장1 + 목사님1 + 장로님2 + 권사님1 + 성도7
-    - 20명: 이단4 + 이단 대장1 + 목사님1 + 장로님2 + 권사님1 + 성도11
-    - game_players 역할 일괄 UPDATE (무작위 셔플 후 배분)
-    - game_rooms status → `'day'`, phase_number → `1`
-  - game_rooms status 변경 이벤트 구독 → 전원 game/play로 자동 이동
+- **Task 009: 대기실 실시간 참가자 목록 구현** ✅ - 완료 (auto-dev · Realtime 첫 도입)
+  - ✅ **⚠️ 아키텍처 결정 — 실시간은 Broadcast 방식(Postgres Changes 폐기)**: Postgres Changes는 컬럼 권한(GRANT)을 무시하고 **전체 행(role·session_token·admin_pin)을 anon에게 전송**함이 실측으로 확인됨(컬럼 제한 시엔 아예 미전달). 따라서 game_players/game_rooms는 anon 완전 차단 유지, `game_players`/`game_rooms`를 realtime publication에 넣지 않고, **서버가 정제된 페이로드만 `room:<roomId>` 채널로 Broadcast**한다. 이 원칙은 후속 Task 010(채팅)·013(페이즈)에도 그대로 적용 — 비밀 컬럼 있는 테이블은 Broadcast로.
+  - ✅ `lib/game/realtime.ts` — 채널 규약(`room:<roomId>`)·이벤트(`player_joined`, `game_started`)·페이로드 타입(role 미포함). 후속 태스크 재사용용 공유 모듈
+  - ✅ `lib/game/broadcast.ts` — `import "server-only"`, service_role로 Broadcast REST(`/realtime/v1/api/broadcast`) 송출 (서버→클라 전달 실측 검증)
+  - ✅ 게임 시작 Server Action (`lib/game/actions.ts` `startGame`): PIN 재검증 → **상태 가드(status='waiting'만 시작 가능, 재시작 재셔플 방지)** → 인원 기반 역할 배분(10/15/20 배분표, Fisher-Yates 셔플) → game_players role 일괄 UPDATE → game_rooms status='day', phase_number=1 → GAME_STARTED broadcast
+  - ✅ `getRoomPlayers`(role/token 제외 정제 목록) + `joinGame` **정원(MAX_PLAYERS=20) 가드** + PLAYER_JOINED broadcast
+  - ✅ 대기실/진행자 대시보드: 더미 제거, 실시간 목록(초기 스냅샷+broadcast 델타, 레이스 병합) + 게임 시작 연동 + game_started 시 `/game/play` 자동 이동
+  - ⚠️ **후속 백로그**: Broadcast 공개 채널 위조 방지(private channel + `realtime.messages` RLS), 역할 배분 트랜잭션(RPC)화, PIN rate-limit
 
   ### 테스트 체크리스트
-  - [ ] 새 참가자 입장 시 대기실 목록에 실시간 추가되는가
-  - [ ] 10명 참가 후 게임 시작 시 역할이 올바른 비율로 배분되는가 (이단 대장 1명, 장로님 포함)
-  - [ ] 게임 시작 후 모든 참가자 화면이 게임 플레이 페이지로 이동하는가
-  - [ ] 진행자만 [게임 시작] 버튼이 보이는가
+  - [x] 새 참가자 입장 시 대기실/진행자 목록에 실시간 추가되는가 _(qa-tester: 양방향 실측)_
+  - [x] 10명 참가 후 게임 시작 시 역할이 올바른 비율로 배분되는가 (이단 대장 1명, 장로님 포함) _(SQL로 배분표 일치 확인)_
+  - [x] 게임 시작 후 모든 참가자 화면이 게임 플레이 페이지로 이동하는가
+  - [x] 진행자만 [게임 시작] 버튼이 보이는가 _(진행자 대시보드에서만, 시작 후 버튼 잠금)_
+  - [x] role/session_token이 클라이언트로 노출되지 않는가 _(getRoomPlayers 응답·broadcast 프레임 실측)_
 
 - **Task 010: 채팅 시스템 구현**
   - `lib/game/hooks/useGameChat.ts` — 채팅 상태 + Realtime 구독 훅 (채널별 구독)
