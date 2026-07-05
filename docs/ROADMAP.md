@@ -272,29 +272,33 @@
   - [x] 진행자만 [게임 시작] 버튼이 보이는가 _(진행자 대시보드에서만, 시작 후 버튼 잠금)_
   - [x] role/session_token이 클라이언트로 노출되지 않는가 _(getRoomPlayers 응답·broadcast 프레임 실측)_
 
-- **Task 010: 채팅 시스템 구현**
-  - `lib/game/hooks/useGameChat.ts` — 채팅 상태 + Realtime 구독 훅 (채널별 구독)
-  - 메시지 전송 Server Action: game_messages INSERT (channel 구분, dm은 recipient_id 포함)
-  - Supabase Realtime 구독
-    - `channel = 'public'` 메시지: 전원 수신
-    - `channel = 'heretic'` 메시지: RLS로 이단·이단 대장만 수신
-    - `channel = 'council'` 메시지: RLS로 목사님·장로님(당회)만 수신
-    - `channel = 'dm'` 메시지: RLS로 발신자·수신자 본인만 수신
-    - `channel = 'system'` 메시지: 전원 수신 (다른 스타일)
-  - 낮 페이즈: 전체 채팅·1:1 채팅 입력 활성 / 밤 페이즈: 전체·1:1 비활성, 비밀 채널 활성
-  - **비밀 채널 탭은 전원 동일 노출(무차별 UI)**, 멤버십에 따라 내용만 분기(이단/당회/개인 플레이스홀더), 밤에 입력 활성
-  - 1:1 채팅: 낮 페이즈·생존자만 상대 지정 가능, 본인 제외 생존자 대상 선택
-  - Sonner 토스트로 새 메시지 알림 (채팅 탭이 숨겨진 경우)
+- **Task 010: 채팅 시스템 구현** ✅ - 완료 (auto-dev · Broadcast fan-out)
+  - ✅ **⚠️ 아키텍처 — 채널 격리는 RLS+Postgres Changes가 아니라 Broadcast 개인 인박스 fan-out**: Task 009에서 확립된 원칙(Postgres Changes는 비밀 컬럼 전체 행 누출) 적용. `game_messages`는 anon 완전 차단(RLS: public/system SELECT만, 쓰기 정책 없음), 모든 읽기/쓰기는 service_role Server Action 경유. 비밀 채널은 서버가 **자격자 개인 인박스 토픽으로만** broadcast해 격리
+  - ✅ `lib/game/inbox.ts` — `computeInboxToken(playerId)=HMAC-SHA256(BROADCAST_INBOX_SECRET, playerId)`(server-only). playerId는 공개지만 토픽은 역산 불가 → 타인 인박스 구독 차단. 인박스 채널: `room:{roomId}:inbox:{token}`
+  - ✅ `lib/game/broadcast.ts` — `broadcastToTopic(topic,event,payload)` 일반화(인박스 fan-out), `broadcastToRoom`은 이를 위임
+  - ✅ `lib/game/realtime.ts` — `CHAT_MESSAGE` 이벤트·`inboxChannel`·`ChatMessagePayload`(role 미포함)
+  - ✅ 메시지 전송 Server Action `sendMessage(token,channel,text,recipientId?)` — game_messages INSERT + fan-out. **서버가 페이즈·역할·생존을 최종 검증**(무차별 UI는 클라 표현일 뿐)
+    - `public` 메시지: 공개 `room:{roomId}` 채널로 전원 수신
+    - `heretic` 메시지: 서버가 이단팀(이단·이단 대장) 인박스로만 fan-out
+    - `council` 메시지: 서버가 당회(목사님·장로님) 인박스로만 fan-out
+    - `dm` 메시지: 발신자·수신자 두 사람 인박스로만. **recipientId UUID 검증으로 `.or()` 필터 인젝션 차단**(제3자 열람 방지 — code-reviewer 발견 치명적 결함 수정)
+    - `system` 메시지: 공개 채널 전원 수신, 전체 탭에 다른 스타일(중앙 pill)로 표시. (서버 내부 발송은 Task 011~013에서)
+  - ✅ `getMessages(token,channel,recipientId?)` — 서버가 자격 검증 후 열람 가능 메시지만 반환(자격 없으면 빈 배열), role 미포함. `getMyRole(token)`(본인 role만, 채팅 멤버십·역할 카드용 — Task 013-2에서 당겨옴), `getMyInboxTopic(token)`
+  - ✅ `lib/game/hooks/useGameChat.ts` — 채널별 스냅샷(getMessages) + 공개 room·개인 인박스 채널 Broadcast 구독, id 기준 dedupe·병합(레이스·echo 대비), 비활성 탭 새 메시지 Sonner 토스트
+  - ✅ `app/game/play/page.tsx` — 더미 완전 제거, 세션(`useGameSession`)·본인 역할(`getMyRole`)·참가자 목록·채팅 실데이터 전환. 세션 가드(무세션→`/game`, waiting→대기실). 낮=전체·1:1 활성/밤=비밀 활성, **탈락자 전 채널 입력 비활성**. 비밀 채널 탭 전원 동일 노출. (투표/밤 행동 패널은 placeholder 유지 — 실동작은 Task 011/012)
+  - ✅ `app/layout.tsx` — `<Toaster />` 마운트
+  - ✅ code-reviewer 정적 리뷰(DM 인젝션 치명적 결함 발견·수정, 탈락자 입력 UX 보강) + qa-tester 실브라우저/DB anon 직접조회/Server Action 직접호출(인젝션 회귀 포함) 3중 검증 — 체크리스트 10/10 PASS
+  - ⚠️ **후속 백로그**: 탈락자 비밀채팅 수신 정책(관전자=구 팀 채팅 열람 허용 여부 미정 — fan-out에 is_alive 미필터), system 메시지 실시간 발송 경로(현재 스냅샷 로드만·발송은 Task 011~013 서버 내부), Broadcast 공개/인박스 채널 위조 방지(private channel + realtime.messages RLS), HMAC 시크릿 전용화(현재 SERVICE_ROLE_KEY 폴백)
 
   ### 테스트 체크리스트
-  - [ ] 낮 페이즈에 전체 채팅 메시지가 모든 참가자에게 실시간 수신되는가
-  - [ ] 비밀 채널 탭이 모든 역할에게 동일하게 노출되는가 (탭 유무로 역할이 드러나지 않는가)
-  - [ ] 이단 채팅 메시지가 성도·목사님·장로님·권사님의 DB 직접 조회에서도 차단되는가
-  - [ ] 당회 채팅 메시지가 목사님·장로님에게만 수신되고 그 외 역할에는 차단되는가
-  - [ ] 1:1 메시지가 발신자·수신자 외 제3자에게 차단되는가 (DB 직접 조회 포함)
-  - [ ] 1:1 채팅이 밤 페이즈·탈락자에게는 비활성화되는가
-  - [ ] 밤 페이즈에 전체 채팅 입력창이 비활성화되는가
-  - [ ] 시스템 메시지가 일반 채팅과 다른 스타일로 표시되는가
+  - [x] 낮 페이즈에 전체 채팅 메시지가 모든 참가자에게 실시간 수신되는가 _(qa-tester: 두 세션 실시간 수신)_
+  - [x] 비밀 채널 탭이 모든 역할에게 동일하게 노출되는가 (탭 유무로 역할이 드러나지 않는가)
+  - [x] 이단 채팅 메시지가 성도·목사님·장로님·권사님의 DB 직접 조회에서도 차단되는가 _(anon REST 직접조회 [] 확인)_
+  - [x] 당회 채팅 메시지가 목사님·장로님에게만 수신되고 그 외 역할에는 차단되는가
+  - [x] 1:1 메시지가 발신자·수신자 외 제3자에게 차단되는가 (DB 직접 조회 포함) _(인젝션 회귀 포함 검증)_
+  - [x] 1:1 채팅이 밤 페이즈·탈락자에게는 비활성화되는가 _(UI 비활성 + 서버 최종 거부)_
+  - [x] 밤 페이즈에 전체 채팅 입력창이 비활성화되는가
+  - [x] 시스템 메시지가 일반 채팅과 다른 스타일로 표시되는가 _(중앙 pill, role="status")_
 
 - **Task 011: 낮 투표 시스템 구현**
   - 투표 Server Action: game_votes UPSERT (1인 1표, 변경 가능)
@@ -388,7 +392,7 @@
 
 - **Task 013-2: 세션 재접속·이어하기 완성** - 우선순위
   > 이탈(화면 잠금·백그라운드·네트워크 끊김·탭 종료·새로고침) 후 복귀한 참가자가 **닉네임 재입력 없이 게임에 매끄럽게 이어붙는** 경험을 완성한다. Task 008에서 기본 라우팅 게이트(지각 입장 차단·상태 기반 이동)는 이미 확립됐고, 이 태스크는 play 화면이 실데이터가 된 뒤(Task 010~013) **내 실제 역할·현재 페이즈·채팅 이력까지 복원**하는 부분을 마무리한다. (설계 원칙: Phase 3 상단 "실시간·재접속 설계 원칙" 참조)
-  - `getMyRole(token)` Server Action — 토큰으로 **본인 1건의 role만** 조회(남의 역할 미노출, 무차별 UI 유지). 재접속 시 내 역할 카드 복원용
+  - ~~`getMyRole(token)` Server Action~~ ✅ **Task 010에서 구현 완료** — 토큰으로 본인 1건 role만 조회(남의 역할 미노출). 재접속 시 내 역할 카드 복원에 그대로 재사용
   - `getResumeState(token)` — 재접속 스냅샷: status·phaseNumber·isAlive·(내)role + 현재 페이즈 채팅/투표 스냅샷 훅 연동
   - 공용 `useGameResume` 게이트 — 모든 게임 화면(`/game/*`)이 현재 status와 어긋나면 알맞은 화면으로 이동(대기/낮·밤/종료)
   - `status='ended'` 복귀 → 게임 종료 결과 화면(전원 역할 공개, Task 006 오버레이 재사용)
