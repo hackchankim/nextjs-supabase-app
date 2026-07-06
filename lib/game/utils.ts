@@ -1,9 +1,12 @@
 // 교회 마피아 게임 — 순수 함수 유틸 (역할 배분·그룹 판별·승리 조건)
 import type { GamePlayer, PlayerRole, RoleDistribution, Winner } from "./types";
-import { COUNCIL_ROLES, HERETIC_ROLES, MAX_PLAYERS, MIN_PLAYERS } from "./constants";
-
-/** 밤 행동 권한 보유 역할 (제거/조사/보호) */
-const NIGHT_ACTION_ROLES: readonly PlayerRole[] = ["heretic_leader", "pastor", "deaconess"];
+import {
+  COUNCIL_ROLES,
+  HERETIC_ROLES,
+  MAX_PLAYERS,
+  MIN_PLAYERS,
+  NIGHT_ACTION_ROLES,
+} from "./constants";
 
 /**
  * 인원수 기반 역할 배분 계산 (10~20명).

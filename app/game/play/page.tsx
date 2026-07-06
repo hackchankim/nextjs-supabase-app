@@ -34,6 +34,7 @@ import { SecretChannelTab } from "@/components/game/SecretChannelTab";
 import { VoteButton } from "@/components/game/VoteButton";
 import { getMyRole, getRoomPlayers, type RoomPlayer } from "@/lib/game/actions";
 import { useGameChat } from "@/lib/game/hooks/useGameChat";
+import { useGameNight } from "@/lib/game/hooks/useGameNight";
 import { useGameSession } from "@/lib/game/hooks/useGameSession";
 import { useGameVotes } from "@/lib/game/hooks/useGameVotes";
 import {
@@ -169,6 +170,21 @@ export default function GamePlayPage() {
     if (!result.ok) {
       toast.error(result.error);
     }
+  };
+
+  // 밤 행동 실데이터 — 조사 결과(있다면)는 훅 내부에서 본인에게만 toast로 표시된다.
+  const { submitNightAction } = useGameNight({
+    roomId: player?.roomId ?? "",
+    sessionToken: sessionToken ?? "",
+  });
+
+  const handleNightAction = async (targetId: string) => {
+    const result = await submitNightAction(targetId);
+    if (!result.ok) {
+      toast.error(result.error);
+      return;
+    }
+    setNightActionTargetId(targetId);
   };
 
   // 탈락/종료 구독 — 채팅·투표와는 별도 채널 인스턴스로 간단히 구독한다.
@@ -326,8 +342,9 @@ export default function GamePlayPage() {
       </div>
 
       {/* 하단 행동 패널 — 페이즈로만 분기, 역할에 따른 외형 분기 절대 금지
-          투표(Task 011)는 실데이터로 연결되었다. 밤 행동은 Task 012 범위 — 크래시 없이 렌더만 한다.
-          게임이 종료(winner)되면 투표 패널을 감춰 종료 후 조작 가능한 것처럼 보이지 않게 한다. */}
+          투표(Task 011)·밤 행동(Task 012) 모두 실데이터로 연결되었다. ActionPanel의 라벨은
+          "밤 행동"으로 고정이며 canAct(boolean)만으로 활성화 여부를 결정한다(역할별 분기 없음).
+          게임이 종료(winner)되면 두 패널 모두 감춰 종료 후 조작 가능한 것처럼 보이지 않게 한다. */}
       {winner ? null : status === "day" ? (
         <Card>
           <CardHeader>
@@ -362,7 +379,7 @@ export default function GamePlayPage() {
             targets={aliveOthers}
             canAct={canAct}
             actionLabel="밤 행동"
-            onAction={setNightActionTargetId}
+            onAction={(targetId) => void handleNightAction(targetId)}
           />
           {nightActionTargetId && (
             <p className="text-center text-sm text-muted-foreground">

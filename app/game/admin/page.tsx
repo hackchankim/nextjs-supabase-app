@@ -13,10 +13,10 @@
 // 이후 태스크에서 실데이터로 교체될 더미 상태로 유지한다.
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -30,9 +30,12 @@ import { PhaseBanner } from "@/components/game/PhaseBanner";
 import { PlayerCard } from "@/components/game/PlayerCard";
 import {
   closeVoting,
+  getNightActionStatus,
   getRoomPlayers,
+  resolveNight,
   resolveVoteElimination,
   startGame,
+  type NightActorStatus,
   type RoomPlayer,
 } from "@/lib/game/actions";
 import { ROLE_LABELS, MIN_PLAYERS, WINNER_LABELS } from "@/lib/game/constants";
@@ -90,7 +93,15 @@ export default function GameAdminPage() {
   const [transitionTo, setTransitionTo] = useState<GameStatus | null>(null);
   const [transitionAt, setTransitionAt] = useState<string | null>(null);
   const [systemMessage, setSystemMessage] = useState("");
-  const [nightChecklist, setNightChecklist] = useState<Record<string, boolean>>({});
+
+  // 밤 행동 완료 현황(Task 012) — getNightActionStatus 실데이터 + NIGHT_ACTION_UPDATE 구독 시 재조회.
+  const [nightActors, setNightActors] = useState<NightActorStatus[]>([]);
+  const [nightStatusError, setNightStatusError] = useState<string | null>(null);
+  const [isResolvingNight, setIsResolvingNight] = useState(false);
+  const [nightResolveError, setNightResolveError] = useState<string | null>(null);
+  // 한 번 밤 결과를 처리하면 같은 밤에는 재처리를 막는다(중복 시스템 메시지 방지).
+  // 서버 phase 마커는 Task 013(페이즈 전환)에서 도입 예정 — 그 전까지의 클라 가드.
+  const [nightResolved, setNightResolved] = useState(false);
 
   // 낮 투표 실데이터 — 초기 스냅샷 조회 수단이 없어(진행자는 세션 토큰이 없다) 0에서 시작해
   // VOTE_UPDATE Broadcast로만 채운다(참가자 목록의 PLAYER_JOINED 초기 로드와 달리 실시간 갱신 전용).
@@ -152,6 +163,22 @@ export default function GameAdminPage() {
     };
   }, [adminCtx]);
 
+  // 밤 행동 완료 현황을 다시 불러온다(PIN 게이트) — 초기 로드 및 NIGHT_ACTION_UPDATE 수신 시 호출한다.
+  const loadNightStatus = useCallback(async () => {
+    if (!adminCtx) return;
+    const result = await getNightActionStatus(adminCtx.roomId, adminCtx.pin);
+    if (result.ok) {
+      setNightActors(result.actors);
+      setNightStatusError(null);
+    } else {
+      setNightStatusError(result.error);
+    }
+  }, [adminCtx]);
+
+  useEffect(() => {
+    void loadNightStatus();
+  }, [loadNightStatus]);
+
   // 실시간 구독 — 새 참가자 입장 (대기실과 동일한 공개 채널/이벤트)
   useEffect(() => {
     if (!adminCtx) return;
@@ -186,23 +213,22 @@ export default function GameAdminPage() {
         const { winner: finishedWinner } = payload as GameEndedPayload;
         setWinner(finishedWinner);
       })
+      .on("broadcast", { event: GAME_EVENTS.NIGHT_ACTION_UPDATE }, () => {
+        // 집계값 자체는 페이로드로 오지만(무차별), 진행자 화면은 역할별 완료 여부(체크리스트)가
+        // 필요하므로 PIN 게이트를 통해 재조회한다.
+        void loadNightStatus();
+      })
       .subscribe();
 
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [adminCtx]);
+  }, [adminCtx, loadNightStatus]);
 
   const aliveCount = players.filter((player) => player.isAlive).length;
   const voteProgress = aliveCount > 0 ? (voterCount / aliveCount) * 100 : 0;
   // 조기 종료는 생존자 전원이 투표를 마쳤을 때만 허용한다(F018).
   const canCloseEarly = aliveCount > 0 && voterCount === aliveCount;
-
-  // 밤 행동 권한 보유 역할만 체크리스트에 나열 — 게임 시작 전에는 role이 없어 항상 빈 목록이다.
-  const nightActors = players.filter(
-    (player) =>
-      player.role && ["heretic_leader", "pastor", "deaconess"].includes(player.role),
-  );
 
   const canStartGame = players.length >= MIN_PLAYERS && !gameStarted;
 
@@ -271,6 +297,32 @@ export default function GameAdminPage() {
     [adminCtx],
   );
 
+  /**
+   * 밤 결과를 처리한다 — kill 대상이 protect로 상쇄되지 않으면 탈락 처리(PLAYER_ELIMINATED
+   * Broadcast로 화면에 반영), 아니면 무효 처리 시스템 메시지만 남는다. 밤→낮 전환은
+   * 이 액션의 책임이 아니다(Task 013 소관) — status는 night로 유지된다.
+   */
+  const handleResolveNight = useCallback(async () => {
+    if (!adminCtx) return;
+    setNightResolveError(null);
+    setIsResolvingNight(true);
+    try {
+      const result = await resolveNight(adminCtx.roomId, adminCtx.pin);
+      if (result.ok) {
+        setNightResolved(true);
+        toast.success(
+          result.eliminatedId ? "밤 사이 한 명이 제거되었습니다" : "밤 사이 아무도 제거되지 않았습니다",
+        );
+      } else {
+        setNightResolveError(result.error);
+      }
+    } catch {
+      setNightResolveError("밤 결과 처리에 실패했습니다. 다시 시도해주세요.");
+    } finally {
+      setIsResolvingNight(false);
+    }
+  }, [adminCtx]);
+
   // 탈락 처리 — 생존 여부 토글 (데모, 실제로는 이후 태스크에서 Server Action으로 대체)
   function handleToggleAlive(playerId: string) {
     setPlayers((prev) =>
@@ -305,10 +357,6 @@ export default function GameAdminPage() {
   function handleCancelTransition() {
     setTransitionTo(null);
     setTransitionAt(null);
-  }
-
-  function handleToggleNightAction(playerId: string) {
-    setNightChecklist((prev) => ({ ...prev, [playerId]: !prev[playerId] }));
   }
 
   if (!ctxChecked || !adminCtx) {
@@ -500,20 +548,36 @@ export default function GameAdminPage() {
             {closeError && <p className="text-destructive text-sm">{closeError}</p>}
           </div>
 
-          {/* 밤 행동 완료 체크리스트 (이단 대장 · 목사님 · 권사님) */}
+          {/* 밤 행동 완료 체크리스트 (이단 대장 · 목사님 · 권사님) — getNightActionStatus 실데이터 */}
           <div className="flex flex-col gap-2 rounded-lg border p-4">
             <span className="text-sm font-medium text-muted-foreground">
               밤 행동 완료 체크리스트
             </span>
-            {nightActors.map((actor) => (
-              <label key={actor.id} className="flex items-center gap-2 text-sm">
-                <Checkbox
-                  checked={!!nightChecklist[actor.id]}
-                  onCheckedChange={() => handleToggleNightAction(actor.id)}
-                />
-                {actor.nickname} ({actor.role ? ROLE_LABELS[actor.role] : "-"})
-              </label>
-            ))}
+            {nightActors.length === 0 ? (
+              <p className="text-sm text-muted-foreground">밤 행동 권한자가 없습니다.</p>
+            ) : (
+              nightActors.map((actor) => (
+                <div key={actor.id} className="flex items-center gap-2 text-sm">
+                  <Badge variant={actor.acted ? "secondary" : "outline"}>
+                    {actor.acted ? "완료" : "대기"}
+                  </Badge>
+                  {actor.nickname} ({ROLE_LABELS[actor.role]})
+                </div>
+              ))
+            )}
+            {nightStatusError && (
+              <p className="text-destructive text-sm">{nightStatusError}</p>
+            )}
+            <Button
+              type="button"
+              onClick={() => void handleResolveNight()}
+              disabled={isResolvingNight || winner !== null || nightResolved}
+            >
+              밤 결과 처리
+            </Button>
+            {nightResolveError && (
+              <p className="text-destructive text-sm">{nightResolveError}</p>
+            )}
           </div>
 
           {/* 시스템 메시지 발송 (데모, 실제 발송 로직 없음) */}

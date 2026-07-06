@@ -35,6 +35,9 @@ export const SAINT_ROLES: readonly PlayerRole[] = [
 /** 당회 그룹 (목사님 + 장로님) — 당회 비밀 채팅 열람 대상 */
 export const COUNCIL_ROLES: readonly PlayerRole[] = ["pastor", "elder"];
 
+/** 밤 행동 권한 보유 역할 (제거/조사/보호) */
+export const NIGHT_ACTION_ROLES: readonly PlayerRole[] = ["heretic_leader", "pastor", "deaconess"];
+
 /** 승리 팀 한글 표시명 — 게임 종료 오버레이/배너에 사용 (전원 역할 공개는 Task 013 소관) */
 export const WINNER_LABELS: Record<Winner, string> = {
   saints: "선 팀 승리!",

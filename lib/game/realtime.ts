@@ -32,6 +32,8 @@ export const GAME_EVENTS = {
   PLAYER_ELIMINATED: "player_eliminated",
   /** 게임이 종료(승리 팀 확정)되었을 때 */
   GAME_ENDED: "game_ended",
+  /** 밤 행동 완료 집계가 갱신되었을 때 (밤 권한자가 행동을 제출할 때마다) */
+  NIGHT_ACTION_UPDATE: "night_action_update",
 } as const;
 
 /** PLAYER_JOINED 이벤트 페이로드 — role/session_token 제외 */
@@ -85,4 +87,15 @@ export interface PlayerEliminatedPayload {
 /** GAME_ENDED 이벤트 페이로드 — 승리 팀만 공개한다 */
 export interface GameEndedPayload {
   winner: Winner;
+}
+
+/**
+ * NIGHT_ACTION_UPDATE 이벤트 페이로드 — 순수 완료 집계만 담는다.
+ * 누가 어떤 역할로 누구에게 어떤 행동을 했는지는 절대 포함하지 않는다(무차별 UI 원칙).
+ */
+export interface NightActionUpdatePayload {
+  /** 이번 phase에 밤 행동을 마친 권한자 수 */
+  completedCount: number;
+  /** 이번 phase의 생존 밤 권한자(이단 대장·목사님·권사님) 총원 */
+  total: number;
 }
