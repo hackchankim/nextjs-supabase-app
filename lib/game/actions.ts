@@ -3,10 +3,24 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { broadcastToRoom, broadcastToTopic } from "@/lib/game/broadcast";
 import { computeInboxToken } from "@/lib/game/inbox";
-import { GAME_EVENTS, inboxChannel, type ChatMessagePayload } from "@/lib/game/realtime";
-import { getRoleDistribution, distributionToRoleList, isCouncil, isHeretic } from "@/lib/game/utils";
-import { MIN_PLAYERS, MAX_PLAYERS } from "@/lib/game/constants";
-import type { ChatChannel, GameStatus, PlayerRole } from "@/lib/game/types";
+import {
+  GAME_EVENTS,
+  inboxChannel,
+  type ChatMessagePayload,
+  type GameEndedPayload,
+  type NightActionUpdatePayload,
+  type VoteUpdatePayload,
+} from "@/lib/game/realtime";
+import {
+  canPerformNightAction,
+  checkWinner,
+  getRoleDistribution,
+  distributionToRoleList,
+  isCouncil,
+  isHeretic,
+} from "@/lib/game/utils";
+import { MIN_PLAYERS, MAX_PLAYERS, NIGHT_ACTION_ROLES } from "@/lib/game/constants";
+import type { ActionType, ChatChannel, GameStatus, PlayerRole, Winner } from "@/lib/game/types";
 import type { GameRoomRow } from "@/lib/types/database.types";
 
 /** 채팅 메시지 최대 길이 */
@@ -674,4 +688,740 @@ export async function getMessages(
     recipientId: row.recipient_id,
     createdAt: row.created_at,
   }));
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 낮 투표 (Task 011)
+// ─────────────────────────────────────────────────────────────────────────
+
+interface VoteTally {
+  /** 대상 참가자 id → 득표 수 */
+  tally: Record<string, number>;
+  /** 이번 페이즈에 투표를 마친 고유 투표자 수 */
+  voterCount: number;
+  /** 현재 생존자 수 */
+  aliveCount: number;
+}
+
+/**
+ * 현재 phase의 투표를 집계한다 (대상별 득표 수 + 고유 투표자 수 + 생존자 수).
+ * 개별 투표자→대상 매핑은 이 함수 밖으로 반환하지 않는다 — 호출부는 집계 결과만 사용해야 한다.
+ */
+async function computeTally(
+  supabase: AdminClient,
+  roomId: string,
+  phaseNumber: number,
+): Promise<VoteTally> {
+  const { data: votes, error: votesError } = await supabase
+    .from("game_votes")
+    .select("voter_id, target_id")
+    .eq("room_id", roomId)
+    .eq("phase_number", phaseNumber);
+
+  if (votesError) {
+    throw new Error(`투표 집계 실패: ${votesError.message}`);
+  }
+
+  const tally: Record<string, number> = {};
+  const voterIds = new Set<string>();
+  (votes ?? []).forEach((vote) => {
+    tally[vote.target_id] = (tally[vote.target_id] ?? 0) + 1;
+    voterIds.add(vote.voter_id);
+  });
+
+  const { count: aliveCount, error: aliveError } = await supabase
+    .from("game_players")
+    .select("id", { count: "exact", head: true })
+    .eq("room_id", roomId)
+    .eq("is_alive", true);
+
+  if (aliveError) {
+    throw new Error(`생존자 집계 실패: ${aliveError.message}`);
+  }
+
+  return { tally, voterCount: voterIds.size, aliveCount: aliveCount ?? 0 };
+}
+
+/**
+ * 참가자를 탈락 처리한다(투표/밤 행동 공통) — is_alive를 false로 갱신하고,
+ * reason에 따라 문구를 분기한 시스템 메시지를 game_messages에 남긴 뒤 공개 채널로
+ * fan-out하고, 탈락 사실을 Broadcast한 다음 승리 조건을 평가한다.
+ * export하지 않는다 — 항상 이 파일 안의 검증된 진입점(closeVoting/resolveNight 등)을 통해서만 호출된다.
+ */
+async function resolveElimination(
+  supabase: AdminClient,
+  roomId: string,
+  targetId: string,
+  reason: "vote" | "night",
+): Promise<Winner | null> {
+  // is_alive=true 조건을 걸어 멱등성을 확보한다 — 이미 탈락한 대상(중복 마감·버튼 재클릭·
+  // 관리자 탭 중복)이면 갱신 행이 0건이 되어, 시스템 메시지·PLAYER_ELIMINATED broadcast를
+  // 반복하지 않는다.
+  const { data: target, error: targetError } = await supabase
+    .from("game_players")
+    .update({ is_alive: false })
+    .eq("id", targetId)
+    .eq("is_alive", true)
+    .select("id, nickname")
+    .maybeSingle();
+
+  if (targetError) {
+    throw new Error(`탈락 처리 실패: ${targetError.message}`);
+  }
+
+  // 이미 탈락한 대상이면 부작용을 반복하지 않고 승리 상태만 재확인한다.
+  if (!target) {
+    return evaluateWinner(supabase, roomId);
+  }
+
+  // 탈락 사유별 시스템 메시지 문구 분기 — vote(낮 투표 마감)와 night(밤 처리 결과)는
+  // 참가자에게 서로 다른 맥락을 전달해야 하므로 문구를 구분한다.
+  const content =
+    reason === "vote"
+      ? `${target.nickname}님이 공동체를 떠났습니다`
+      : `밤 사이 ${target.nickname}님이 이단 세력에 의해 제거되었습니다`;
+
+  const { data: message, error: messageError } = await supabase
+    .from("game_messages")
+    .insert({
+      room_id: roomId,
+      player_id: null,
+      channel: "system",
+      content,
+    })
+    .select("id, created_at")
+    .single();
+
+  if (!messageError && message) {
+    const payload: ChatMessagePayload = {
+      id: message.id,
+      channel: "system",
+      senderId: null,
+      senderNickname: "시스템",
+      text: content,
+      recipientId: null,
+      createdAt: message.created_at,
+    };
+    await broadcastToRoom(roomId, GAME_EVENTS.CHAT_MESSAGE, payload);
+  }
+
+  await broadcastToRoom(roomId, GAME_EVENTS.PLAYER_ELIMINATED, { playerId: targetId });
+
+  return evaluateWinner(supabase, roomId);
+}
+
+/**
+ * 승리 조건을 평가한다 — 승자가 확정되면 game_rooms를 ended로 갱신하고 Broadcast한다.
+ * export하지 않는다(resolveElimination 내부에서만 호출).
+ */
+async function evaluateWinner(supabase: AdminClient, roomId: string): Promise<Winner | null> {
+  const { data: players, error } = await supabase
+    .from("game_players")
+    .select("role, is_alive")
+    .eq("room_id", roomId);
+
+  if (error || !players) {
+    return null;
+  }
+
+  const winner = checkWinner(
+    players.map((p) => ({ role: p.role as PlayerRole | null, isAlive: p.is_alive })),
+  );
+
+  if (winner) {
+    await supabase.from("game_rooms").update({ status: "ended", winner }).eq("id", roomId);
+
+    const payload: GameEndedPayload = { winner };
+    await broadcastToRoom(roomId, GAME_EVENTS.GAME_ENDED, payload);
+  }
+
+  return winner;
+}
+
+type CastVoteResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * 낮 투표를 등록/변경한다 — 1인 1표, 같은 phase 내 재투표 시 대상을 덮어쓴다(UPSERT).
+ * 서버가 페이즈(day)·생존 여부·대상 유효성을 최종 검증하는 최후 방어선이다.
+ * 개별 투표자→대상 매핑은 Broadcast하지 않는다 — 대상별 집계만 VOTE_UPDATE로 공개한다.
+ */
+export async function castVote(token: string, targetId: string): Promise<CastVoteResult> {
+  try {
+    const supabase = createAdminClient();
+    const voter = await getSenderContext(supabase, token);
+
+    if (!voter) {
+      return { ok: false, error: "세션이 유효하지 않습니다" };
+    }
+
+    if (!voter.isAlive) {
+      return { ok: false, error: "탈락한 참가자는 투표할 수 없습니다" };
+    }
+
+    if (!UUID_RE.test(targetId) || targetId === voter.id) {
+      return { ok: false, error: "투표 대상을 확인해주세요" };
+    }
+
+    const { data: room, error: roomError } = await supabase
+      .from("game_rooms")
+      .select("status, phase_number")
+      .eq("id", voter.roomId)
+      .maybeSingle();
+
+    if (roomError || !room) {
+      return { ok: false, error: "게임 방을 찾을 수 없습니다" };
+    }
+
+    if (room.status !== "day") {
+      return { ok: false, error: "낮에만 투표할 수 있습니다" };
+    }
+
+    const { data: target, error: targetError } = await supabase
+      .from("game_players")
+      .select("id, room_id, is_alive")
+      .eq("id", targetId)
+      .maybeSingle();
+
+    if (targetError || !target || target.room_id !== voter.roomId || !target.is_alive) {
+      return { ok: false, error: "투표 대상을 확인해주세요" };
+    }
+
+    const { error: upsertError } = await supabase.from("game_votes").upsert(
+      {
+        room_id: voter.roomId,
+        phase_number: room.phase_number,
+        voter_id: voter.id,
+        target_id: targetId,
+      },
+      { onConflict: "room_id,phase_number,voter_id" },
+    );
+
+    if (upsertError) {
+      return { ok: false, error: `투표 실패: ${upsertError.message}` };
+    }
+
+    const tally = await computeTally(supabase, voter.roomId, room.phase_number);
+    const payload: VoteUpdatePayload = tally;
+    await broadcastToRoom(voter.roomId, GAME_EVENTS.VOTE_UPDATE, payload);
+
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
+  }
+}
+
+export interface VoteState {
+  /** 대상 참가자 id → 득표 수 */
+  tally: Record<string, number>;
+  /** 본인이 이번 페이즈에 투표한 대상 id (미투표면 null) */
+  myVote: string | null;
+  /** 이번 페이즈에 투표를 마친 고유 투표자 수 */
+  voterCount: number;
+  /** 현재 생존자 수 */
+  aliveCount: number;
+}
+
+/**
+ * 세션 토큰으로 현재 phase의 투표 스냅샷을 조회한다 (집계 + 본인 투표만).
+ * role/다른 참가자의 투표 대상은 절대 포함하지 않는다.
+ */
+export async function getVoteState(token: string): Promise<VoteState | null> {
+  const supabase = createAdminClient();
+  const voter = await getSenderContext(supabase, token);
+
+  if (!voter) {
+    return null;
+  }
+
+  const { data: room, error: roomError } = await supabase
+    .from("game_rooms")
+    .select("phase_number")
+    .eq("id", voter.roomId)
+    .maybeSingle();
+
+  if (roomError || !room) {
+    return null;
+  }
+
+  const { tally, voterCount, aliveCount } = await computeTally(
+    supabase,
+    voter.roomId,
+    room.phase_number,
+  );
+
+  const { data: myVoteRow } = await supabase
+    .from("game_votes")
+    .select("target_id")
+    .eq("room_id", voter.roomId)
+    .eq("phase_number", room.phase_number)
+    .eq("voter_id", voter.id)
+    .maybeSingle();
+
+  return {
+    tally,
+    myVote: myVoteRow?.target_id ?? null,
+    voterCount,
+    aliveCount,
+  };
+}
+
+type CloseVotingResult =
+  | { ok: true; eliminatedId: string; winner: Winner | null }
+  | { ok: false; tie: true; candidates: { id: string; nickname: string; count: number }[] }
+  | { ok: false; error: string };
+
+/**
+ * 진행자가 투표를 마감한다 — PIN 재검증 후 최다 득표자를 탈락 처리한다.
+ * 동률(최다 득표가 2명 이상)이면 탈락 처리를 보류하고 후보 목록만 반환한다
+ * (진행자가 resolveVoteElimination으로 수동 확정).
+ */
+export async function closeVoting(roomId: string, pin: string): Promise<CloseVotingResult> {
+  const verifyResult = await verifyAdminPin(pin);
+  if (!verifyResult.ok) {
+    return verifyResult;
+  }
+  if (verifyResult.roomId !== roomId) {
+    return { ok: false, error: "PIN이 올바르지 않습니다" };
+  }
+
+  try {
+    const supabase = createAdminClient();
+
+    const { data: room, error: roomError } = await supabase
+      .from("game_rooms")
+      .select("status, phase_number")
+      .eq("id", roomId)
+      .maybeSingle();
+
+    if (roomError || !room) {
+      return { ok: false, error: "게임 방을 찾을 수 없습니다" };
+    }
+
+    // 낮에만 마감 가능 — 밤/종료 상태에서의 중복·오호출을 서버가 차단한다.
+    if (room.status !== "day") {
+      return { ok: false, error: "낮에만 투표를 마감할 수 있습니다" };
+    }
+
+    const { tally } = await computeTally(supabase, roomId, room.phase_number);
+
+    const entries = Object.entries(tally);
+    if (entries.length === 0) {
+      return { ok: false, error: "투표가 없습니다" };
+    }
+
+    const maxCount = Math.max(...entries.map(([, count]) => count));
+    const topTargetIds = entries.filter(([, count]) => count === maxCount).map(([id]) => id);
+
+    if (topTargetIds.length > 1) {
+      const { data: candidatePlayers } = await supabase
+        .from("game_players")
+        .select("id, nickname")
+        .in("id", topTargetIds);
+
+      const candidates = topTargetIds.map((id) => ({
+        id,
+        nickname: candidatePlayers?.find((p) => p.id === id)?.nickname ?? "알 수 없음",
+        count: maxCount,
+      }));
+
+      return { ok: false, tie: true, candidates };
+    }
+
+    const eliminatedId = topTargetIds[0];
+    const winner = await resolveElimination(supabase, roomId, eliminatedId, "vote");
+
+    return { ok: true, eliminatedId, winner };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
+  }
+}
+
+type ResolveVoteEliminationResult =
+  | { ok: true; eliminatedId: string; winner: Winner | null }
+  | { ok: false; error: string };
+
+/**
+ * 동률 상황에서 진행자가 후보 중 한 명을 선택해 탈락을 확정한다.
+ * targetId가 현재 phase의 최다 득표 후보인지 재검증한 뒤 resolveElimination을 호출한다.
+ */
+export async function resolveVoteElimination(
+  roomId: string,
+  pin: string,
+  targetId: string,
+): Promise<ResolveVoteEliminationResult> {
+  const verifyResult = await verifyAdminPin(pin);
+  if (!verifyResult.ok) {
+    return verifyResult;
+  }
+  if (verifyResult.roomId !== roomId) {
+    return { ok: false, error: "PIN이 올바르지 않습니다" };
+  }
+
+  try {
+    const supabase = createAdminClient();
+
+    const { data: room, error: roomError } = await supabase
+      .from("game_rooms")
+      .select("status, phase_number")
+      .eq("id", roomId)
+      .maybeSingle();
+
+    if (roomError || !room) {
+      return { ok: false, error: "게임 방을 찾을 수 없습니다" };
+    }
+
+    if (room.status !== "day") {
+      return { ok: false, error: "낮에만 투표를 마감할 수 있습니다" };
+    }
+
+    const { tally } = await computeTally(supabase, roomId, room.phase_number);
+
+    if (!(targetId in tally) || tally[targetId] <= 0) {
+      return { ok: false, error: "유효한 후보가 아닙니다" };
+    }
+
+    const maxCount = Math.max(...Object.values(tally));
+    if (tally[targetId] !== maxCount) {
+      return { ok: false, error: "최다 득표자가 아닙니다" };
+    }
+
+    const winner = await resolveElimination(supabase, roomId, targetId, "vote");
+
+    return { ok: true, eliminatedId: targetId, winner };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 밤 행동 (Task 012)
+// ─────────────────────────────────────────────────────────────────────────
+
+/** 역할 → action_type 매핑. 밤 행동 권한이 없는 역할은 키 자체가 없다. */
+const ROLE_TO_ACTION_TYPE: Partial<Record<PlayerRole, ActionType>> = {
+  heretic_leader: "kill",
+  pastor: "investigate",
+  deaconess: "protect",
+};
+
+/**
+ * 현재 phase의 밤 행동 완료 집계(완료 수/총원)를 계산한다 — Broadcast(NIGHT_ACTION_UPDATE)와
+ * getNightActionStatus가 공유하는 헬퍼. 누가 행동을 완료했는지(개별 매핑)는 반환하지 않는다.
+ */
+async function computeNightActionProgress(
+  supabase: AdminClient,
+  roomId: string,
+  phaseNumber: number,
+): Promise<{ completedCount: number; total: number }> {
+  const { data: players, error: playersError } = await supabase
+    .from("game_players")
+    .select("id, role, is_alive")
+    .eq("room_id", roomId);
+
+  if (playersError) {
+    throw new Error(`참가자 조회 실패: ${playersError.message}`);
+  }
+
+  const eligibleIds = new Set(
+    (players ?? [])
+      .filter((p) => p.is_alive && NIGHT_ACTION_ROLES.includes(p.role as PlayerRole))
+      .map((p) => p.id),
+  );
+
+  const { data: actions, error: actionsError } = await supabase
+    .from("game_night_actions")
+    .select("actor_id")
+    .eq("room_id", roomId)
+    .eq("phase_number", phaseNumber);
+
+  if (actionsError) {
+    throw new Error(`밤 행동 집계 실패: ${actionsError.message}`);
+  }
+
+  const completedCount = (actions ?? []).filter((a) => eligibleIds.has(a.actor_id)).length;
+
+  return { completedCount, total: eligibleIds.size };
+}
+
+type SubmitNightActionResult =
+  | { ok: true; investigation?: "heretic" | "saint" }
+  | { ok: false; error: string };
+
+/**
+ * 밤 행동을 등록/변경한다(제거/조사/보호 공통, 1인 1행동 UPSERT — action_type은 역할로 서버가
+ * 결정하며 클라이언트가 지정하지 않는다). 서버가 페이즈(night)·생존 여부·역할 권한·대상
+ * 유효성을 최종 검증하는 최후 방어선이다.
+ *
+ * 목사님(pastor)의 조사 결과는 이 함수의 반환값에만 담긴다 — game_night_actions(DB)나
+ * NIGHT_ACTION_UPDATE(Broadcast)에는 절대 기록/포함하지 않는다. 위장 없이 판정한다
+ * (이단 대장도 isHeretic이므로 "heretic"으로 조사된다).
+ */
+export async function submitNightAction(
+  token: string,
+  targetId: string,
+): Promise<SubmitNightActionResult> {
+  try {
+    const supabase = createAdminClient();
+    const actor = await getSenderContext(supabase, token);
+
+    if (!actor) {
+      return { ok: false, error: "세션이 유효하지 않습니다" };
+    }
+
+    const { data: room, error: roomError } = await supabase
+      .from("game_rooms")
+      .select("status, phase_number")
+      .eq("id", actor.roomId)
+      .maybeSingle();
+
+    if (roomError || !room) {
+      return { ok: false, error: "게임 방을 찾을 수 없습니다" };
+    }
+
+    if (room.status !== "night") {
+      return { ok: false, error: "밤에만 행동할 수 있습니다" };
+    }
+
+    if (!canPerformNightAction(actor.role, actor.isAlive)) {
+      return { ok: false, error: "밤에 할 수 있는 행동이 없습니다" };
+    }
+
+    if (!UUID_RE.test(targetId) || targetId === actor.id) {
+      return { ok: false, error: "행동 대상을 확인해주세요" };
+    }
+
+    const { data: target, error: targetError } = await supabase
+      .from("game_players")
+      .select("id, room_id, role, is_alive")
+      .eq("id", targetId)
+      .maybeSingle();
+
+    if (targetError || !target || target.room_id !== actor.roomId || !target.is_alive) {
+      return { ok: false, error: "행동 대상을 확인해주세요" };
+    }
+
+    // canPerformNightAction(actor.role, ...)을 통과했으므로 actor.role은 항상
+    // ROLE_TO_ACTION_TYPE에 매핑되지만, 타입 좁히기를 위해 방어적으로 확인한다.
+    const actionType = actor.role ? ROLE_TO_ACTION_TYPE[actor.role] : undefined;
+    if (!actionType) {
+      return { ok: false, error: "밤에 할 수 있는 행동이 없습니다" };
+    }
+
+    const { error: upsertError } = await supabase.from("game_night_actions").upsert(
+      {
+        room_id: actor.roomId,
+        phase_number: room.phase_number,
+        actor_id: actor.id,
+        target_id: targetId,
+        action_type: actionType,
+      },
+      { onConflict: "room_id,phase_number,actor_id" },
+    );
+
+    if (upsertError) {
+      return { ok: false, error: `밤 행동 등록 실패: ${upsertError.message}` };
+    }
+
+    const { completedCount, total } = await computeNightActionProgress(
+      supabase,
+      actor.roomId,
+      room.phase_number,
+    );
+    const progressPayload: NightActionUpdatePayload = { completedCount, total };
+    await broadcastToRoom(actor.roomId, GAME_EVENTS.NIGHT_ACTION_UPDATE, progressPayload);
+
+    if (actionType === "investigate") {
+      return {
+        ok: true,
+        investigation: isHeretic(target.role as PlayerRole | null) ? "heretic" : "saint",
+      };
+    }
+
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
+  }
+}
+
+export interface NightActorStatus {
+  id: string;
+  nickname: string;
+  role: PlayerRole;
+  acted: boolean;
+}
+
+type GetNightActionStatusResult =
+  | { ok: true; actors: NightActorStatus[] }
+  | { ok: false; error: string };
+
+/**
+ * 진행자가 밤 행동 완료 현황을 조회한다(PIN 게이트) — 방의 생존 밤 권한자(이단 대장·
+ * 목사님·권사님) 목록과 각자 현재 phase의 행동 완료 여부를 반환한다.
+ * 진행자 제어 탭은 이미 역할을 표로 노출하므로(스펙상 정상) role 포함이 안전하다 —
+ * 참가자 화면(무차별 UI)에는 이 함수를 절대 노출하지 않는다.
+ */
+export async function getNightActionStatus(
+  roomId: string,
+  pin: string,
+): Promise<GetNightActionStatusResult> {
+  const verifyResult = await verifyAdminPin(pin);
+  if (!verifyResult.ok) {
+    return verifyResult;
+  }
+  if (verifyResult.roomId !== roomId) {
+    return { ok: false, error: "PIN이 올바르지 않습니다" };
+  }
+
+  try {
+    const supabase = createAdminClient();
+
+    const { data: room, error: roomError } = await supabase
+      .from("game_rooms")
+      .select("phase_number")
+      .eq("id", roomId)
+      .maybeSingle();
+
+    if (roomError || !room) {
+      return { ok: false, error: "게임 방을 찾을 수 없습니다" };
+    }
+
+    const { data: players, error: playersError } = await supabase
+      .from("game_players")
+      .select("id, nickname, role, is_alive")
+      .eq("room_id", roomId);
+
+    if (playersError) {
+      return { ok: false, error: `참가자 조회 실패: ${playersError.message}` };
+    }
+
+    const eligible = (players ?? []).filter(
+      (p) => p.is_alive && NIGHT_ACTION_ROLES.includes(p.role as PlayerRole),
+    );
+
+    const { data: actions, error: actionsError } = await supabase
+      .from("game_night_actions")
+      .select("actor_id")
+      .eq("room_id", roomId)
+      .eq("phase_number", room.phase_number);
+
+    if (actionsError) {
+      return { ok: false, error: `밤 행동 집계 실패: ${actionsError.message}` };
+    }
+
+    const actedIds = new Set((actions ?? []).map((a) => a.actor_id));
+
+    const actors: NightActorStatus[] = eligible.map((p) => ({
+      id: p.id,
+      nickname: p.nickname,
+      role: p.role as PlayerRole,
+      acted: actedIds.has(p.id),
+    }));
+
+    return { ok: true, actors };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
+  }
+}
+
+type ResolveNightResult =
+  | { ok: true; eliminatedId: string | null; winner: Winner | null }
+  | { ok: false; error: string };
+
+/**
+ * 진행자가 밤 행동 결과를 처리한다(PIN 게이트) — 현재 phase의 kill/protect 대상을 산출해
+ * 보호로 상쇄되지 않은 kill 대상만 resolveElimination(reason="night")으로 탈락 처리한다.
+ * 제거 대상이 없거나 보호로 상쇄된 경우 "아무도 제거되지 않았습니다" 시스템 메시지만 남긴다.
+ *
+ * 밤→낮 전환(game_rooms.status 변경)은 이 함수의 책임이 아니다(Task 013 소관) —
+ * 여기서는 status를 night로 그대로 둔다. 대신 status!=='night'이면 이미 처리된
+ * 것으로 보고 거부해 중복·오호출(버튼 재클릭 등)을 막는다.
+ */
+export async function resolveNight(roomId: string, pin: string): Promise<ResolveNightResult> {
+  const verifyResult = await verifyAdminPin(pin);
+  if (!verifyResult.ok) {
+    return verifyResult;
+  }
+  if (verifyResult.roomId !== roomId) {
+    return { ok: false, error: "PIN이 올바르지 않습니다" };
+  }
+
+  try {
+    const supabase = createAdminClient();
+
+    const { data: room, error: roomError } = await supabase
+      .from("game_rooms")
+      .select("status, phase_number")
+      .eq("id", roomId)
+      .maybeSingle();
+
+    if (roomError || !room) {
+      return { ok: false, error: "게임 방을 찾을 수 없습니다" };
+    }
+
+    if (room.status !== "night") {
+      return { ok: false, error: "밤에만 처리할 수 있습니다" };
+    }
+
+    const { data: actions, error: actionsError } = await supabase
+      .from("game_night_actions")
+      .select("target_id, action_type")
+      .eq("room_id", roomId)
+      .eq("phase_number", room.phase_number);
+
+    if (actionsError) {
+      return { ok: false, error: `밤 행동 조회 실패: ${actionsError.message}` };
+    }
+
+    const killTarget = (actions ?? []).find((a) => a.action_type === "kill")?.target_id ?? null;
+    const protectTarget =
+      (actions ?? []).find((a) => a.action_type === "protect")?.target_id ?? null;
+
+    if (killTarget && killTarget !== protectTarget) {
+      const winner = await resolveElimination(supabase, roomId, killTarget, "night");
+      return { ok: true, eliminatedId: killTarget, winner };
+    }
+
+    // 제거 대상이 없거나 권사님의 보호로 상쇄된 경우 — 탈락 없이 무효 시스템 메시지만 남긴다.
+    const content = "밤 사이 아무도 제거되지 않았습니다";
+    const { data: message, error: messageError } = await supabase
+      .from("game_messages")
+      .insert({ room_id: roomId, player_id: null, channel: "system", content })
+      .select("id, created_at")
+      .single();
+
+    if (!messageError && message) {
+      const payload: ChatMessagePayload = {
+        id: message.id,
+        channel: "system",
+        senderId: null,
+        senderNickname: "시스템",
+        text: content,
+        recipientId: null,
+        createdAt: message.created_at,
+      };
+      await broadcastToRoom(roomId, GAME_EVENTS.CHAT_MESSAGE, payload);
+    }
+
+    return { ok: true, eliminatedId: null, winner: null };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
+  }
 }

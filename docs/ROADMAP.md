@@ -300,52 +300,50 @@
   - [x] 밤 페이즈에 전체 채팅 입력창이 비활성화되는가
   - [x] 시스템 메시지가 일반 채팅과 다른 스타일로 표시되는가 _(중앙 pill, role="status")_
 
-- **Task 011: 낮 투표 시스템 구현**
-  - 투표 Server Action: game_votes UPSERT (1인 1표, 변경 가능)
-  - `lib/game/hooks/useGameVotes.ts` — 투표 현황 실시간 구독
-  - 살아있는 플레이어 목록 기반 VoteButton 렌더링
-  - 자신에게 투표 불가 처리
-  - 진행자 투표 마감 Server Action
-    - 최다 득표자 산출 (동률 시 진행자 수동 선택 모달)
-    - game_players is_alive → false
-    - 시스템 메시지 발송 ("○○님이 공동체를 떠났습니다")
-    - 승리 조건 체크 실행
-  - 투표 조기 종료 (F018): 생존자 수 == 고유 투표자 수이면 진행자 대시보드에 "전원 투표 완료" 표시 + [조기 종료] 버튼 활성화 (즉시 마감 Server Action 호출)
-  - 진행자 대시보드 실시간 투표 집계 + 투표 진행률("n/생존자수") 표시
+- **Task 011: 낮 투표 시스템 구현** ✅ - 완료 (auto-dev · Broadcast 집계)
+  - ✅ 투표 Server Action `castVote(token, targetId)` — game_votes UPSERT(1인 1표, onConflict room_id,phase_number,voter_id로 변경 가능). 낮·생존 투표자·대상 생존/같은방/자기자신 불가를 **서버가 최종 검증**
+  - ✅ `lib/game/hooks/useGameVotes.ts` — `getVoteState` 스냅샷 + 공개 room 채널 `VOTE_UPDATE` Broadcast 구독(집계 델타). Postgres Changes 미사용
+  - ✅ 살아있는 플레이어 기반 VoteButton 렌더링(자신 제외) + 내 투표 하이라이트 + 대상별 득표수 표시
+  - ✅ 진행자 투표 마감 Server Action `closeVoting(roomId, pin)` — **PIN 재검증 + 낮 상태 가드**
+    - 최다 득표자 산출, 동률(≥2) 시 후보 반환 → 진행자 수동 선택 모달 → `resolveVoteElimination(roomId, pin, targetId)`(후보 재검증)
+    - ✅ 공유 헬퍼 `resolveElimination`(is_alive→false, **is_alive=true 가드로 중복 마감 멱등화**, 시스템 메시지 발송+`PLAYER_ELIMINATED` broadcast) / `evaluateWinner`(`checkWinner`→ended+winner+`GAME_ENDED` broadcast) — **Task 012/013이 재사용**
+  - ✅ 투표 조기 종료 (F018): `voterCount==aliveCount`일 때만 진행자 [조기 종료] 활성
+  - ✅ 진행자 대시보드 실시간 집계 + 진행률("n/생존자수") + 종료 후 버튼 비활성. play 화면 본인 탈락 즉시 반영(selfAlive) + 종료 상태 고정(winner/resultOpen 분리)으로 종료 후 투표 패널 은닉
+  - ✅ **보안 수정**: `game_votes.anon SELECT using(true)` 정책이 개별 투표(voter→target)를 anon에 직접 노출하던 결함(admin_pin과 동일 유형)을 마이그레이션 `0003_restrict_game_votes.sql`(정책 제거 + anon SELECT revoke)로 프로덕션 차단. code-reviewer 발견 → **사용자 승인(비밀 투표)** 후 적용·검증
+  - ✅ **정합성**: Broadcast(VOTE_UPDATE/PLAYER_ELIMINATED/GAME_ENDED)·Server Action 응답에 개별 voter→target 매핑·role·session_token 미포함(집계 count만)
+  - ⚠️ **후속 백로그**: play 페이지 3중 room 채널 구독 통합(useGameChat/useGameVotes/탈락구독), phase 전환 실시간 동기화(Task 013)
 
   ### 테스트 체크리스트
-  - [ ] 투표 후 다른 참가자로 변경 투표가 가능한가 (1인 1표 유지)
-  - [ ] 진행자 화면에 실시간 투표 집계와 진행률이 표시되는가
-  - [ ] 생존자 전원이 투표하면 [조기 종료] 버튼이 활성화되는가
-  - [ ] 투표 마감 후 최다 득표자가 탈락 처리되는가
-  - [ ] 탈락 처리 후 해당 플레이어의 투표 버튼이 비활성화되는가
-  - [ ] 동률 시 진행자 수동 선택 모달이 표시되는가
+  - [x] 투표 후 다른 참가자로 변경 투표가 가능한가 (1인 1표 유지) _(SQL: voter 행 1건 유지)_
+  - [x] 진행자 화면에 실시간 투표 집계와 진행률이 표시되는가
+  - [x] 생존자 전원이 투표하면 [조기 종료] 버튼이 활성화되는가
+  - [x] 투표 마감 후 최다 득표자가 탈락 처리되는가 _(is_alive=false + 시스템 메시지)_
+  - [x] 탈락 처리 후 해당 플레이어의 투표 버튼이 비활성화되는가 _(본인 탈락 즉시 반영)_
+  - [x] 동률 시 진행자 수동 선택 모달이 표시되는가
+  - [x] 개별 투표가 anon 직접조회/broadcast 프레임에 노출되지 않는가 _(REST 401 + 원시 WebSocket 프레임 실증)_
 
-- **Task 012: 밤 행동 시스템 구현**
-  - 밤 행동 Server Action: game_night_actions UPSERT (권한 검증 — 권한 없는 역할 요청은 거부/no-op)
-  - 역할별 행동 처리 (UI 외형은 전원 동일, 실제 동작만 권한자 한정)
-    - 이단 대장(heretic_leader)만: 제거 대상 선택 → `action_type: 'kill'` (일반 이단은 비밀 채팅으로 작전만, 제거 선택 불가)
-    - 목사님(pastor): 조사 대상 선택 → `action_type: 'investigate'`
-    - 권사님(deaconess): 보호 대상 선택 → `action_type: 'protect'`
-    - 장로님(elder)·성도·일반 이단: 밤 행동 없음 — 외형 동일한 no-op 대기 패널
-  - 목사님 조사 결과 처리
-    - 대상이 이단 팀(`heretic` 또는 `heretic_leader`)이면 "이단입니다", 그 외는 "성도입니다" 반환 (위장 없음 — 이단 대장도 "이단"으로 식별)
-    - 결과를 Sonner 토스트로 해당 플레이어에게만 표시
-  - 진행자 밤 행동 완료 현황 표시 (누가 완료했는지 체크 — 실제 권한자 기준)
-  - 밤 결과 처리 Server Action (진행자 "아침으로" 버튼)
-    - 보호 대상과 제거 대상이 겹치면 제거 무효
-    - 제거 대상 is_alive → false
-    - 시스템 메시지 발송 ("밤 사이 ○○님이 이단 세력에 의해 제거되었습니다")
-    - 승리 조건 체크 실행
+- **Task 012: 밤 행동 시스템 구현** ✅ - 완료 (auto-dev · 무차별 UI + 조사 격리)
+  - ✅ 밤 행동 Server Action `submitNightAction(token, targetId)` — 밤·생존·권한(canPerformNightAction) **서버 최종 검증**, 역할→action_type 매핑, game_night_actions UPSERT(onConflict room_id,phase_number,actor_id). game_night_actions는 anon 완전 차단(RLS 정책 0개)
+  - ✅ 역할별 행동 처리 (**UI 외형 전원 동일 — actionLabel "밤 행동" 고정·canAct(boolean)만**, 실제 동작만 권한자)
+    - 이단 대장→`kill`, 목사님→`investigate`, 권사님→`protect`. 그 외(장로님·성도·일반 이단)는 canAct=false no-op(외형 동일)
+    - 권한 없는 역할의 밤 행동 시도는 서버가 거부("밤에 할 수 있는 행동이 없습니다")
+  - ✅ 목사님 조사 결과 — 대상 `isHeretic`이면 "이단"(위장 없음: 이단 대장도 "이단"), 그 외 "성도". **`submitNightAction` 동기 응답으로 목사님 본인에게만**(Sonner 토스트) — DB·broadcast·타인에게 절대 미기록/미노출
+  - ✅ 진행자 밤 행동 완료 현황 `getNightActionStatus(roomId, pin)` (PIN 게이트, 실제 권한자 기준) + NIGHT_ACTION_UPDATE 구독 재조회
+  - ✅ 밤 결과 처리 Server Action `resolveNight(roomId, pin)` (진행자 [밤 결과 처리])
+    - **보호 대상 == 제거 대상이면 제거 무효**(상쇄) → "밤 사이 아무도 제거되지 않았습니다"
+    - 제거 대상 `is_alive→false` + 시스템 메시지("밤 사이 ○○님이 이단 세력에 의해 제거되었습니다") + 승리 조건 체크 (Task 011 `resolveElimination`/`evaluateWinner` 재사용, reason='night'로 문구 분기)
+    - PIN 재검증·밤 상태 가드. status는 night 유지(밤→낮 전환은 Task 013 소관). 중복 처리는 멱등 가드(resolveElimination is_alive) + admin nightResolved 클라 가드
+  - ✅ NIGHT_ACTION_UPDATE broadcast는 집계(completedCount/total)만 — role/대상/조사결과 미포함
+  - ⚠️ **후속 백로그**: resolveNight 서버측 phase 처리 마커로 완전 멱등화(현재 admin 클라 가드·Task 013 전환 시 자연 해결), resolveNight no-op 재호출 응답 eliminatedId 정확도, useGameNight 미사용 집계 상태 정리
 
   ### 테스트 체크리스트
-  - [ ] 이단 대장의 제거 행동만 game_night_actions에 저장되고, 일반 이단의 제거 시도는 거부되는가
-  - [ ] 일반 이단·장로님·성도의 밤 행동 패널 외형이 권한자와 동일하게 보이는가 (무차별 UI)
-  - [ ] 권사님 보호 대상과 이단 대장 제거 대상이 같을 때 제거가 무효화되는가
-  - [ ] 목사님이 이단·이단 대장을 조사할 때 모두 "이단입니다"로 반환되는가 (위장 없음)
-  - [ ] 목사님이 선 팀(성도·장로님·권사님)을 조사할 때 "성도입니다"로 반환되는가
-  - [ ] 조사 결과가 목사님에게만 표시되는가
-  - [ ] 밤 행동 완료 후 진행자 대시보드에 완료 현황이 표시되는가
+  - [x] 이단 대장의 제거 행동만 game_night_actions에 저장되고, 일반 이단의 제거 시도는 거부되는가 _(raw fetch 우회 시도도 서버 거부·DB 미기록)_
+  - [x] 일반 이단·장로님·성도의 밤 행동 패널 외형이 권한자와 동일하게 보이는가 (무차별 UI) _(6역할 스크린샷 비교)_
+  - [x] 권사님 보호 대상과 이단 대장 제거 대상이 같을 때 제거가 무효화되는가
+  - [x] 목사님이 이단·이단 대장을 조사할 때 모두 "이단입니다"로 반환되는가 (위장 없음)
+  - [x] 목사님이 선 팀(성도·장로님·권사님)을 조사할 때 "성도입니다"로 반환되는가
+  - [x] 조사 결과가 목사님에게만 표시되는가 _(DB/broadcast/anon 직접조회 3중 격리 실증)_
+  - [x] 밤 행동 완료 후 진행자 대시보드에 완료 현황이 표시되는가
 
 - **Task 013: 페이즈 전환 및 승리 조건 구현**
   - 페이즈 전환 카운트다운 Server Action (F017)
