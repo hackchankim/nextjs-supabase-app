@@ -8,9 +8,10 @@
 //   PlayerCard를 그대로 재사용하면 role을 props로 받지 않으므로 역할 노출 없이 안전하다.
 // - [제어] 탭: 진행자만 보는 화면이므로 역할을 표로 노출하는 것이 스펙상 정상 동작이다.
 //
-// 이번 태스크(Task 009)에서는 참가자 목록만 실시간 실데이터(getRoomPlayers + Broadcast 구독)로
-// 교체하고 게임 시작을 실제 Server Action(startGame)으로 연결한다. 투표·페이즈 전환 등 나머지는
-// 이후 태스크에서 실데이터로 교체될 더미 상태로 유지한다.
+// Task 009~012에서 참가자 목록·게임 시작·투표·밤 행동을 실데이터로 연결했고,
+// Task 013에서 페이즈 전환(예약/취소/자동 확정)·수동 탈락 처리·게임 리셋을 useGamePhase +
+// 해당 Server Action들로 연결해 더미 상태를 모두 제거했다. 시스템 메시지 발송/강제 게임 종료는
+// 이 태스크 범위 밖이다(전자는 미구현, 후자는 승리 조건 자동 판정으로 대체).
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
@@ -29,25 +30,29 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PhaseBanner } from "@/components/game/PhaseBanner";
 import { PlayerCard } from "@/components/game/PlayerCard";
 import {
+  cancelPhaseTransition,
   closeVoting,
   getNightActionStatus,
   getRoomPlayers,
+  manualEliminate,
+  resetGame,
   resolveNight,
   resolveVoteElimination,
   startGame,
+  startPhaseTransition,
   type NightActorStatus,
   type RoomPlayer,
 } from "@/lib/game/actions";
+import { useGamePhase } from "@/lib/game/hooks/useGamePhase";
 import { ROLE_LABELS, MIN_PLAYERS, WINNER_LABELS } from "@/lib/game/constants";
 import {
   GAME_EVENTS,
   roomChannel,
-  type GameEndedPayload,
   type PlayerEliminatedPayload,
   type PlayerJoinedPayload,
   type VoteUpdatePayload,
 } from "@/lib/game/realtime";
-import type { GamePlayer, GameStatus, Winner } from "@/lib/game/types";
+import type { GamePlayer } from "@/lib/game/types";
 import { createClient } from "@/lib/supabase/client";
 
 /** sessionStorage에 저장된 진행자 인증 컨텍스트 (verifyAdminPin 성공 시 game/page.tsx가 저장) */
@@ -81,38 +86,73 @@ export default function GameAdminPage() {
   const [players, setPlayers] = useState<GamePlayer[]>([]);
   const [startError, setStartError] = useState<string | null>(null);
   const [isStarting, setIsStarting] = useState(false);
-  const [gameStarted, setGameStarted] = useState(false);
 
-  // ─────────────────────────────────────────────────────────────
-  // 나머지 데모 상태 — 실제 게임 로직이 아니다.
-  // 이후 태스크에서 실제 Server Action/Realtime으로 대체 예정.
-  // ─────────────────────────────────────────────────────────────
   const [onlineIds, setOnlineIds] = useState<Set<string>>(new Set());
-  // 이후 태스크에서 실제 game_rooms.status 반영 및 전환 로직으로 대체 예정 — 현재는 고정값.
-  const [status] = useState<GameStatus>("waiting");
-  const [transitionTo, setTransitionTo] = useState<GameStatus | null>(null);
-  const [transitionAt, setTransitionAt] = useState<string | null>(null);
   const [systemMessage, setSystemMessage] = useState("");
+
+  // 페이즈 전환 제어 — 게임 시작(Task 013)
+  const [isTransitioning, setIsTransitioning] = useState(false);
+  const [transitionError, setTransitionError] = useState<string | null>(null);
+  const [isEliminating, setIsEliminating] = useState<string | null>(null);
+  const [eliminateError, setEliminateError] = useState<string | null>(null);
+  const [isResetting, setIsResetting] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
 
   // 밤 행동 완료 현황(Task 012) — getNightActionStatus 실데이터 + NIGHT_ACTION_UPDATE 구독 시 재조회.
   const [nightActors, setNightActors] = useState<NightActorStatus[]>([]);
   const [nightStatusError, setNightStatusError] = useState<string | null>(null);
   const [isResolvingNight, setIsResolvingNight] = useState(false);
   const [nightResolveError, setNightResolveError] = useState<string | null>(null);
-  // 한 번 밤 결과를 처리하면 같은 밤에는 재처리를 막는다(중복 시스템 메시지 방지).
-  // 서버 phase 마커는 Task 013(페이즈 전환)에서 도입 예정 — 그 전까지의 클라 가드.
+  // 한 번 밤 결과를 처리하면 같은 밤에는 재처리를 막는다(중복 시스템 메시지 방지) —
+  // 여전히 클라이언트 가드다(resolveNight 자체는 서버 phase 마커로 멱등화되어 있지 않다).
+  // status가 "night"으로 바뀌면(PHASE_CHANGED, 아래 effect) 다음 밤을 위해 초기화된다.
   const [nightResolved, setNightResolved] = useState(false);
 
   // 낮 투표 실데이터 — 초기 스냅샷 조회 수단이 없어(진행자는 세션 토큰이 없다) 0에서 시작해
   // VOTE_UPDATE Broadcast로만 채운다(참가자 목록의 PLAYER_JOINED 초기 로드와 달리 실시간 갱신 전용).
   const [tally, setTally] = useState<Record<string, number>>({});
   const [voterCount, setVoterCount] = useState(0);
-  const [winner, setWinner] = useState<Winner | null>(null);
   const [closeError, setCloseError] = useState<string | null>(null);
   const [isClosingVote, setIsClosingVote] = useState(false);
   const [tieCandidates, setTieCandidates] = useState<
     { id: string; nickname: string; count: number }[] | null
   >(null);
+
+  // 페이즈 실데이터(Task 013) — 마운트 시 getRoomState 스냅샷 + PHASE_TRANSITION_*/
+  // PHASE_CHANGED/GAME_ENDED/GAME_RESET Broadcast로 실시간 동기화된다. winner도 이 훅이
+  // GAME_ENDED로 갱신하므로 별도의 winner state를 두지 않는다.
+  const { status, phaseNumber, transitionTo, transitionAt, winner } = useGamePhase({
+    roomId: adminCtx?.roomId ?? "",
+    onReset: () => {
+      setPlayers((prev) => prev.map((player) => ({ ...player, isAlive: true, role: null })));
+      setTally({});
+      setVoterCount(0);
+      setCloseError(null);
+      setStartError(null);
+      setTieCandidates(null);
+      setNightActors([]);
+      setNightResolved(false);
+      setNightStatusError(null);
+      setTransitionError(null);
+      setEliminateError(null);
+    },
+  });
+
+  // 밤 결과 처리는 phase당 한 번만 허용하는 클라 가드다 — 새 밤이 시작(PHASE_CHANGED로
+  // status가 night으로 바뀜)되면 다음 밤을 다시 처리할 수 있도록 초기화한다.
+  useEffect(() => {
+    if (status === "night") setNightResolved(false);
+  }, [status]);
+
+  // 투표 집계는 phase 스코프라 새 낮이 시작되면 이전 라운드 값이 남아 있으면 안 된다.
+  useEffect(() => {
+    if (status === "day") {
+      setTally({});
+      setVoterCount(0);
+      setCloseError(null);
+      setTieCandidates(null);
+    }
+  }, [status]);
 
   // sessionStorage에서 진행자 인증 컨텍스트 복원 — 없으면 입장 화면으로 되돌린다.
   useEffect(() => {
@@ -194,10 +234,6 @@ export default function GameAdminPage() {
         });
         setOnlineIds((prev) => new Set(prev).add(joined.id));
       })
-      .on("broadcast", { event: GAME_EVENTS.GAME_STARTED }, () => {
-        // 시작되면 재시작 버튼을 잠근다(서버에도 상태 가드가 있지만 UI에서도 이중 방어).
-        setGameStarted(true);
-      })
       .on("broadcast", { event: GAME_EVENTS.VOTE_UPDATE }, ({ payload }) => {
         const update = payload as VoteUpdatePayload;
         setTally(update.tally);
@@ -208,10 +244,6 @@ export default function GameAdminPage() {
         setPlayers((prev) =>
           prev.map((p) => (p.id === playerId ? { ...p, isAlive: false } : p)),
         );
-      })
-      .on("broadcast", { event: GAME_EVENTS.GAME_ENDED }, ({ payload }) => {
-        const { winner: finishedWinner } = payload as GameEndedPayload;
-        setWinner(finishedWinner);
       })
       .on("broadcast", { event: GAME_EVENTS.NIGHT_ACTION_UPDATE }, () => {
         // 집계값 자체는 페이로드로 오지만(무차별), 진행자 화면은 역할별 완료 여부(체크리스트)가
@@ -230,7 +262,9 @@ export default function GameAdminPage() {
   // 조기 종료는 생존자 전원이 투표를 마쳤을 때만 허용한다(F018).
   const canCloseEarly = aliveCount > 0 && voterCount === aliveCount;
 
-  const canStartGame = players.length >= MIN_PLAYERS && !gameStarted;
+  // 게임 시작 가능 여부는 실제 game_rooms.status(useGamePhase)로 판단한다 —
+  // 별도의 로컬 "시작됨" 플래그를 두지 않아 새로고침/재접속 후에도 항상 정확하다.
+  const canStartGame = players.length >= MIN_PLAYERS && status === "waiting";
 
   const handleStartGame = useCallback(async () => {
     if (!adminCtx) return;
@@ -238,9 +272,7 @@ export default function GameAdminPage() {
     setIsStarting(true);
     try {
       const result = await startGame(adminCtx.roomId, adminCtx.pin);
-      if (result.ok) {
-        setGameStarted(true);
-      } else {
+      if (!result.ok) {
         setStartError(result.error);
       }
     } catch {
@@ -323,16 +355,31 @@ export default function GameAdminPage() {
     }
   }, [adminCtx]);
 
-  // 탈락 처리 — 생존 여부 토글 (데모, 실제로는 이후 태스크에서 Server Action으로 대체)
-  function handleToggleAlive(playerId: string) {
-    setPlayers((prev) =>
-      prev.map((player) =>
-        player.id === playerId ? { ...player, isAlive: !player.isAlive } : player,
-      ),
-    );
-  }
+  /**
+   * 수동 탈락 처리(이견 처리용) — 생존자에 대해서만 의미가 있다. 실제 결과는
+   * PLAYER_ELIMINATED Broadcast로 players 상태에 반영되므로 여기서는 로컬 상태를
+   * 직접 건드리지 않는다(resolveElimination의 is_alive=true 가드로 멱등하다).
+   */
+  const handleManualEliminate = useCallback(
+    async (playerId: string) => {
+      if (!adminCtx) return;
+      setEliminateError(null);
+      setIsEliminating(playerId);
+      try {
+        const result = await manualEliminate(adminCtx.roomId, adminCtx.pin, playerId);
+        if (!result.ok) {
+          setEliminateError(result.error);
+        }
+      } catch {
+        setEliminateError("탈락 처리에 실패했습니다. 다시 시도해주세요.");
+      } finally {
+        setIsEliminating(null);
+      }
+    },
+    [adminCtx],
+  );
 
-  // 강퇴 — 탈락 처리 + 접속 상태 오프라인 처리 (데모)
+  // 강퇴 — 탈락 처리 + 접속 상태 오프라인 처리 (데모, Task 013-1 소관)
   function handleKick(playerId: string) {
     setPlayers((prev) =>
       prev.map((player) =>
@@ -346,18 +393,58 @@ export default function GameAdminPage() {
     });
   }
 
-  // 페이즈 전환 요청 — 반대 상태로 전환 예약만 하고 실제 전환은 하지 않는다.
-  // 초 단위 카운트다운/자동 전환 로직은 이후 태스크에서 구현 예정.
-  function handleRequestTransition() {
-    const next: GameStatus = status === "day" ? "night" : "day";
-    setTransitionTo(next);
-    setTransitionAt(new Date().toISOString());
-  }
+  /** 페이즈 전환을 예약한다 — 현재 상태의 반대로 10초 카운트다운을 시작한다. */
+  const handleRequestTransition = useCallback(async () => {
+    if (!adminCtx) return;
+    if (status !== "day" && status !== "night") return;
+    const next = status === "day" ? "night" : "day";
+    setTransitionError(null);
+    setIsTransitioning(true);
+    try {
+      const result = await startPhaseTransition(adminCtx.roomId, adminCtx.pin, next);
+      if (!result.ok) {
+        setTransitionError(result.error);
+      }
+    } catch {
+      setTransitionError("전환 예약에 실패했습니다. 다시 시도해주세요.");
+    } finally {
+      setIsTransitioning(false);
+    }
+  }, [adminCtx, status]);
 
-  function handleCancelTransition() {
-    setTransitionTo(null);
-    setTransitionAt(null);
-  }
+  /** 예약된 페이즈 전환을 취소한다. */
+  const handleCancelTransition = useCallback(async () => {
+    if (!adminCtx) return;
+    setTransitionError(null);
+    try {
+      const result = await cancelPhaseTransition(adminCtx.roomId, adminCtx.pin);
+      if (!result.ok) {
+        setTransitionError(result.error);
+      }
+    } catch {
+      setTransitionError("전환 취소에 실패했습니다. 다시 시도해주세요.");
+    }
+  }, [adminCtx]);
+
+  /** 게임을 초기화한다 — 되돌릴 수 없으므로 확인 절차를 거친다. */
+  const handleResetGame = useCallback(() => {
+    if (!adminCtx) return;
+    if (
+      !window.confirm(
+        "정말로 게임을 초기화하시겠습니까? 투표·채팅·역할 등 모든 진행 상황이 삭제됩니다.",
+      )
+    ) {
+      return;
+    }
+    setResetError(null);
+    setIsResetting(true);
+    resetGame(adminCtx.roomId, adminCtx.pin)
+      .then((result) => {
+        if (!result.ok) setResetError(result.error);
+      })
+      .catch(() => setResetError("게임 초기화에 실패했습니다. 다시 시도해주세요."))
+      .finally(() => setIsResetting(false));
+  }, [adminCtx]);
 
   if (!ctxChecked || !adminCtx) {
     return null;
@@ -372,7 +459,7 @@ export default function GameAdminPage() {
         </p>
       </div>
 
-      {/* 게임 종료 배너 — 승리 팀 텍스트까지만(전원 역할 공개는 Task 013 소관) */}
+      {/* 게임 종료 배너 — 승리 팀 텍스트까지만(전원 역할 공개 그리드는 참가자 결과 화면에만 존재) */}
       {winner && (
         <div className="rounded-lg border bg-muted p-3 text-center text-lg font-bold">
           {WINNER_LABELS[winner]}
@@ -389,7 +476,7 @@ export default function GameAdminPage() {
         <TabsContent value="screen" className="flex flex-col gap-4">
           <PhaseBanner
             status={status}
-            phaseNumber={1}
+            phaseNumber={phaseNumber}
             transitionTo={transitionTo}
             transitionAt={transitionAt}
           />
@@ -464,9 +551,14 @@ export default function GameAdminPage() {
                           type="button"
                           size="sm"
                           variant="outline"
-                          onClick={() => handleToggleAlive(player.id)}
+                          disabled={
+                            !player.isAlive ||
+                            isEliminating === player.id ||
+                            (status !== "day" && status !== "night")
+                          }
+                          onClick={() => void handleManualEliminate(player.id)}
                         >
-                          {player.isAlive ? "탈락 처리" : "부활 처리"}
+                          탈락 처리
                         </Button>
                         <Button
                           type="button"
@@ -483,6 +575,7 @@ export default function GameAdminPage() {
               </tbody>
             </table>
           </div>
+          {eliminateError && <p className="text-destructive text-sm">{eliminateError}</p>}
 
           {/* 게임 시작 제어 — 최소 인원 미달 시 버튼을 노출하지 않는다 */}
           <div className="flex flex-col gap-2 rounded-lg border p-4">
@@ -490,10 +583,15 @@ export default function GameAdminPage() {
               현재 인원 {players.length} / 최소 {MIN_PLAYERS}명
             </span>
             {canStartGame ? (
-              <Button type="button" size="lg" onClick={handleStartGame} disabled={isStarting}>
+              <Button
+                type="button"
+                size="lg"
+                onClick={() => void handleStartGame()}
+                disabled={isStarting}
+              >
                 게임 시작
               </Button>
-            ) : gameStarted ? (
+            ) : status !== "waiting" ? (
               <p className="text-sm text-muted-foreground">게임이 시작되었습니다.</p>
             ) : (
               <p className="text-sm text-muted-foreground">
@@ -503,23 +601,34 @@ export default function GameAdminPage() {
             {startError && <p className="text-destructive text-sm">{startError}</p>}
           </div>
 
-          {/* 페이즈 전환 제어 */}
-          <div className="flex flex-col gap-2 rounded-lg border p-4">
-            <span className="text-sm font-medium text-muted-foreground">페이즈 전환</span>
-            <div className="flex flex-wrap items-center gap-2">
-              <Button type="button" onClick={handleRequestTransition} disabled={!!transitionTo}>
-                {status === "day" ? "밤으로 전환" : "낮으로 전환"}
-              </Button>
-              {transitionTo && (
-                <>
-                  <span className="text-sm text-muted-foreground">전환 대기 중...</span>
-                  <Button type="button" variant="outline" onClick={handleCancelTransition}>
-                    전환 취소
-                  </Button>
-                </>
-              )}
+          {/* 페이즈 전환 제어 — 낮/밤 상태에서만 의미가 있다(대기/종료 중에는 숨긴다) */}
+          {(status === "day" || status === "night") && (
+            <div className="flex flex-col gap-2 rounded-lg border p-4">
+              <span className="text-sm font-medium text-muted-foreground">페이즈 전환</span>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  onClick={() => void handleRequestTransition()}
+                  disabled={!!transitionTo || isTransitioning || winner !== null}
+                >
+                  {status === "day" ? "밤으로 전환" : "낮으로 전환"}
+                </Button>
+                {transitionTo && (
+                  <>
+                    <span className="text-sm text-muted-foreground">전환 대기 중...</span>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => void handleCancelTransition()}
+                    >
+                      전환 취소
+                    </Button>
+                  </>
+                )}
+              </div>
+              {transitionError && <p className="text-destructive text-sm">{transitionError}</p>}
             </div>
-          </div>
+          )}
 
           {/* 투표 마감 제어 */}
           <div className="flex flex-col gap-2 rounded-lg border p-4">
@@ -595,16 +704,27 @@ export default function GameAdminPage() {
             </div>
           </div>
 
-          {/* 게임 종료 (데모) */}
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              variant="destructive"
-              disabled
-              title="이후 태스크에서 Server Action으로 구현 예정"
-            >
-              게임 종료
-            </Button>
+          {/* 게임 종료/초기화 — 강제 종료는 범위 밖(승리 조건 자동 판정), 리셋은 실제 동작 */}
+          <div className="flex flex-col gap-2">
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="destructive"
+                disabled
+                title="승리 조건 충족 시 자동으로 종료됩니다"
+              >
+                게임 종료
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                onClick={handleResetGame}
+                disabled={isResetting}
+              >
+                게임 리셋
+              </Button>
+            </div>
+            {resetError && <p className="text-destructive text-sm">{resetError}</p>}
           </div>
         </TabsContent>
       </Tabs>

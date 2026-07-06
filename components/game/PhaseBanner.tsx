@@ -1,5 +1,11 @@
+"use client";
+
 // 낮/밤 단계 배너 — 현재 진행 상태와 라운드 번호를 표시
-// transitionAt이 있으면 카운트다운 표시 영역만 마련 (실제 타이머 로직은 이후 Phase에서 구현)
+// transitionAt이 있으면 1초 간격으로 남은 초를 계산해 카운트다운을 표시한다. 실제 전환은
+// 서버(commitPhaseTransition, lib/game/hooks/useGamePhase.ts)가 transition_at 기준으로
+// 확정하므로, 이 컴포넌트의 카운트다운은 어디까지나 로컬 표시용 UX다(전 클라이언트가 같은
+// transitionAt을 기준으로 각자 계산하므로 초 단위로 동기화되어 보인다).
+import { useEffect, useState } from "react";
 import { Clock, Moon, Sun } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -22,6 +28,12 @@ const STATUS_LABELS: Record<GameStatus, string> = {
   ended: "게임 종료",
 };
 
+/** transitionAt(ISO)까지 남은 초를 0 이상 정수로 계산한다. */
+function computeRemainingSeconds(transitionAt: string): number {
+  const remainingMs = Date.parse(transitionAt) - Date.now();
+  return Math.max(0, Math.ceil(remainingMs / 1000));
+}
+
 export function PhaseBanner({
   status,
   phaseNumber,
@@ -29,6 +41,19 @@ export function PhaseBanner({
   transitionAt,
 }: PhaseBannerProps) {
   const PhaseIcon = status === "night" ? Moon : Sun;
+
+  const [remainingSeconds, setRemainingSeconds] = useState(0);
+
+  useEffect(() => {
+    if (!transitionAt) return;
+
+    setRemainingSeconds(computeRemainingSeconds(transitionAt));
+    const interval = setInterval(() => {
+      setRemainingSeconds(computeRemainingSeconds(transitionAt));
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [transitionAt]);
 
   return (
     <Card>
@@ -45,10 +70,9 @@ export function PhaseBanner({
             aria-live="polite"
           >
             <Clock className="h-4 w-4" aria-hidden="true" />
-            {/* TODO: transitionAt 기준 실시간 카운트다운 로직 구현 필요 */}
             <span>
-              {transitionTo ? STATUS_LABELS[transitionTo] : "다음 단계"}(으)로 전환
-              대기 중
+              곧 {transitionTo ? STATUS_LABELS[transitionTo] : "다음 단계"}이 됩니다 (
+              {remainingSeconds}초)
             </span>
           </div>
         )}

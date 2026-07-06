@@ -32,9 +32,16 @@ import { PhaseBanner } from "@/components/game/PhaseBanner";
 import { RoleCard } from "@/components/game/RoleCard";
 import { SecretChannelTab } from "@/components/game/SecretChannelTab";
 import { VoteButton } from "@/components/game/VoteButton";
-import { getMyRole, getRoomPlayers, type RoomPlayer } from "@/lib/game/actions";
+import {
+  getGameResult,
+  getMyRole,
+  getRoomPlayers,
+  type GameResultPlayer,
+  type RoomPlayer,
+} from "@/lib/game/actions";
 import { useGameChat } from "@/lib/game/hooks/useGameChat";
 import { useGameNight } from "@/lib/game/hooks/useGameNight";
+import { useGamePhase } from "@/lib/game/hooks/useGamePhase";
 import { useGameSession } from "@/lib/game/hooks/useGameSession";
 import { useGameVotes } from "@/lib/game/hooks/useGameVotes";
 import {
@@ -44,7 +51,7 @@ import {
   type GameEndedPayload,
   type PlayerEliminatedPayload,
 } from "@/lib/game/realtime";
-import { WINNER_LABELS } from "@/lib/game/constants";
+import { ROLE_LABELS, WINNER_LABELS } from "@/lib/game/constants";
 import type { ChatChannel, GameMessage, GamePlayer, PlayerRole, Winner } from "@/lib/game/types";
 import { canPerformNightAction, isCouncil, isHeretic } from "@/lib/game/utils";
 import { createClient } from "@/lib/supabase/client";
@@ -97,9 +104,20 @@ export default function GamePlayPage() {
   // 종료 오버레이의 여닫기는 별도 상태(resultOpen)로 분리해, 닫아도 winner가 유지되도록 한다.
   const [winner, setWinner] = useState<Winner | null>(null);
   const [resultOpen, setResultOpen] = useState(false);
+  // 게임 종료 후 전원 역할 공개 그리드 데이터 — status='ended' 확정 후에만 getGameResult로 채워진다.
+  const [resultPlayers, setResultPlayers] = useState<GameResultPlayer[]>([]);
   // 본인 탈락 여부 — useGameSession의 player.isAlive는 마운트 시 1회만 세팅되므로,
   // PLAYER_ELIMINATED로 본인이 탈락하면 이 플래그로 즉시 입력을 비활성화한다.
   const [selfEliminated, setSelfEliminated] = useState(false);
+
+  // 페이즈 실데이터 — 마운트 시 getRoomState 스냅샷 + PHASE_TRANSITION_*/PHASE_CHANGED/GAME_RESET
+  // Broadcast로 실시간 동기화된다(player.roomStatus는 마운트 시 1회 스냅샷이라 더 이상 화면
+  // 렌더링에 쓰지 않는다 — 초기 라우팅 가드에만 사용).
+  const { status, phaseNumber, transitionTo, transitionAt } = useGamePhase({
+    roomId: player?.roomId ?? "",
+    initialStatus: player?.roomStatus,
+    onReset: () => router.replace("/game/waiting"),
+  });
 
   // 세션 기반 라우팅 가드 — 세션 없으면 입장 화면, 아직 대기 중이면 대기실로.
   useEffect(() => {
@@ -207,6 +225,11 @@ export default function GamePlayPage() {
         const { winner: finishedWinner } = payload as GameEndedPayload;
         setWinner(finishedWinner);
         setResultOpen(true);
+        // 종료 후에만 역할이 공개되므로(getGameResult의 status==='ended' 가드) 여기서
+        // 전원의 역할·생존 여부를 불러와 결과 오버레이 그리드를 채운다.
+        getGameResult(player.roomId).then((result) => {
+          if (result) setResultPlayers(result.players);
+        });
       })
       .subscribe();
 
@@ -215,12 +238,28 @@ export default function GamePlayPage() {
     };
   }, [player]);
 
+  // 재접속 안전망 — 이탈 중 게임이 이미 종료된 경우 GAME_ENDED broadcast를 놓치므로,
+  // useGamePhase의 초기 스냅샷이 status='ended'로 도착하면 여기서도 결과를 불러온다.
+  // getGameResult는 순수 조회라 위 GAME_ENDED 핸들러와 중복 호출돼도 안전하다(멱등).
+  useEffect(() => {
+    if (!player || status !== "ended") return;
+    let cancelled = false;
+    getGameResult(player.roomId).then((result) => {
+      if (cancelled || !result) return;
+      setWinner(result.winner);
+      setResultPlayers(result.players);
+      setResultOpen(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [player, status]);
+
   if (loading || !player) {
     return null;
   }
 
   const roomId = player.roomId;
-  const status = player.roomStatus;
   // 본인 생존 여부 — 세션의 초기값과 실시간 탈락(PLAYER_ELIMINATED)을 함께 반영한다.
   const selfAlive = player.isAlive && !selfEliminated;
 
@@ -264,8 +303,13 @@ export default function GamePlayPage() {
         </DialogContent>
       </Dialog>
 
-      {/* 페이즈 배너 */}
-      <PhaseBanner status={status} phaseNumber={1} />
+      {/* 페이즈 배너 — 실시간 status/phaseNumber, 전환 예약 중이면 카운트다운 표시 */}
+      <PhaseBanner
+        status={status}
+        phaseNumber={phaseNumber}
+        transitionTo={transitionTo}
+        transitionAt={transitionAt}
+      />
 
       {/* 생존 현황 — 개별 역할은 노출하지 않고 콤팩트 참가자 칩만 표시 */}
       <div className="flex flex-col gap-2 rounded-lg border p-3">
@@ -389,16 +433,32 @@ export default function GamePlayPage() {
         </>
       )}
 
-      {/* 게임 종료 최소 오버레이 — 승리 팀 텍스트까지만. 전원 역할 공개 전체 화면은 Task 013 소관.
-          닫아도 winner는 유지되어 투표 패널은 다시 나타나지 않는다(종료 상태 고정). */}
+      {/* 게임 종료 오버레이 — 승리 팀 발표 + 전원 역할 공개(getGameResult, status='ended' 가드
+          통과 후에만 role이 채워진다). 닫아도 winner는 유지되어 투표/밤 행동 패널은 다시
+          나타나지 않는다(종료 상태 고정) — resultOpen은 오버레이 여닫기만 담당한다. */}
       {winner && (
         <>
           <Dialog open={resultOpen} onOpenChange={setResultOpen}>
-            <DialogContent>
+            <DialogContent className="max-h-[85vh] overflow-y-auto">
               <DialogHeader>
-                <DialogTitle>게임 종료</DialogTitle>
+                <DialogTitle>게임 종료 — {WINNER_LABELS[winner]}</DialogTitle>
               </DialogHeader>
-              <p className="py-4 text-center text-xl font-bold">{WINNER_LABELS[winner]}</p>
+              <div className="grid grid-cols-2 gap-2 py-2">
+                {resultPlayers.map((resultPlayer) => (
+                  <div
+                    key={resultPlayer.id}
+                    className={cn(
+                      "rounded-md border p-2 text-center text-sm",
+                      !resultPlayer.isAlive && "opacity-60",
+                    )}
+                  >
+                    <p className="font-medium">{resultPlayer.nickname}</p>
+                    <p className="text-muted-foreground">
+                      {resultPlayer.role ? ROLE_LABELS[resultPlayer.role] : "-"}
+                    </p>
+                  </div>
+                ))}
+              </div>
             </DialogContent>
           </Dialog>
           <p className="text-center text-lg font-semibold text-muted-foreground">
