@@ -345,32 +345,26 @@
   - [x] 조사 결과가 목사님에게만 표시되는가 _(DB/broadcast/anon 직접조회 3중 격리 실증)_
   - [x] 밤 행동 완료 후 진행자 대시보드에 완료 현황이 표시되는가
 
-- **Task 013: 페이즈 전환 및 승리 조건 구현**
-  - 페이즈 전환 카운트다운 Server Action (F017)
-    - 전환 시작: game_rooms `transition_to`(다음 status) + `transition_at`(now + 10초) 설정
-    - 전 클라이언트는 `transition_at` 기준으로 동기화된 10초 카운트다운 표시
-    - 전환 취소: 진행자가 카운트다운 중 [전환 취소] → `transition_to`/`transition_at` null로 초기화
-  - 페이즈 전환 확정 Server Action (`lib/game/actions.ts`)
-    - 카운트다운 완료 시 game_rooms status 업데이트 (`day ↔ night`), `transition_*` 초기화
-    - phase_number 증가 (밤 → 낮 전환 시)
-    - 전환 시 시스템 메시지 자동 발송
-  - 승리 조건 체크 함수
-    - 선 팀 승리: 이단 역할 플레이어 전원 is_alive = false
-    - 악 팀 승리: 생존 이단 수 ≥ 생존 성도 수
-    - 조건 충족 시 game_rooms status → `'ended'`, winner 기록
-    - 전원 게임 종료 결과 화면 표시 (역할 전체 공개 포함)
-  - game_rooms Realtime 구독 → 모든 클라이언트에 상태 변경 반영
-  - 진행자 수동 탈락 처리 Server Action (이견 처리용)
-  - 게임 리셋 Server Action: 모든 테이블 데이터 초기화 + waiting 상태로 복귀
+- **Task 013: 페이즈 전환 및 승리 조건 구현** ✅ - 완료 (auto-dev · end-to-end 완성)
+  - ✅ 페이즈 전환 카운트다운 (F017): `startPhaseTransition(roomId, pin, nextStatus)` (PIN 재검증) → `transition_to`+`transition_at`(now+10초) → SCHEDULED broadcast. 전 클라 `transition_at` 기준 동기 10초 카운트다운(PhaseBanner). `cancelPhaseTransition`(PIN) → transition_* null → CANCELLED broadcast
+  - ✅ 페이즈 전환 확정 `commitPhaseTransition(roomId)` — **PIN 없이** transition_at 경과+transition_to 설정 시에만, **조건부 UPDATE(`.not(transition_to,is,null)`)로 멱등**(여러 클라 동시 호출에도 첫 호출만 부작용) → status day↔night, 밤→낮에 phase_number 증가, transition_* 초기화, 시스템 메시지 자동 발송, PHASE_CHANGED broadcast. **진행자 이탈에도 전환 보장**(어느 클라든 경과 시 호출)
+  - ✅ 승리 조건 — `evaluateWinner`(Task 011 재사용): 선 팀=이단 전멸, 악 팀=생존 이단≥성도. 충족 시 status='ended'+winner+GAME_ENDED broadcast. **이미 ended면 재판정·재브로드캐스트 안 함**(조건부 update `.neq(ended)`로 GAME_ENDED 1회만 — 종료 후 오버레이 강제 재오픈 방지) + transition_* 정리
+  - ✅ 전원 게임 종료 결과 화면 — `getGameResult(roomId)`는 **status='ended'에서만** 전원 닉네임+역할 공개(진행 중 호출 시 null — 역할 유출 차단). play 종료 오버레이에 전원 역할 그리드, winner/resultOpen 분리(닫아도 종료 상태 고정)
+  - ✅ 실시간 status 반영 — `getRoomState`(공개 스냅샷·role 없음) + PHASE_* Broadcast 구독(`useGamePhase`). play/admin이 마운트 스냅샷+델타로 실시간 페이즈 전환(낮=투표·전체채팅 / 밤=비밀채널·밤행동 자동 전환)
+  - ✅ 진행자 수동 탈락 `manualEliminate(roomId, pin, targetId)` (PIN·**day/night 가드**·resolveElimination reason='manual')
+  - ✅ 게임 리셋 `resetGame(roomId, pin)` — votes/night_actions/messages 삭제 + players(role=null, is_alive=true) + room(waiting/phase0/winner null) → GAME_RESET broadcast → play는 /game/waiting 이동. **참가자 레코드 유지**(행사 재시작 시 닉네임 재입력 불필요)
+  - ✅ **보안/정합 수정**: `verifyAdminPin`이 `getOrCreateActiveRoom`(ended 제외)으로 방을 재조회해 **게임 종료 후 리셋/진행자 액션이 PIN 불일치로 영구 실패**하던 치명 결함(qa-tester 발견)을 `verifyAdminPin(pin, roomId?)`로 해당 방 직접 검증하도록 수정(9개 PIN 액션 일괄)
+  - ⚠️ **후속 백로그**: resetGame RPC 원자화, RoomState.transitionTo 타입 좁히기, PhaseBanner lazy init 초기 플리커
+  - ⚠️ **선행 완료로 해소된 백로그**: play 페이지 phase 전환 실시간 동기화(Task 011 백로그) · Task 012 nightResolved/투표집계 phase별 초기화 — 이번 useGamePhase 도입으로 해결
 
   ### 테스트 체크리스트
-  - [ ] 진행자가 페이즈 전환 시작 시 모든 참가자 화면에 10초 카운트다운이 동기화 표시되는가
-  - [ ] 카운트다운 중 진행자가 [전환 취소] 시 전원 화면에서 전환이 중단되는가
-  - [ ] 카운트다운 완료 후 모든 참가자 화면이 동시에 갱신되는가
-  - [ ] 이단(이단 대장 포함) 전원 탈락 시 선 팀 승리 화면이 표시되는가
-  - [ ] 생존 이단 수 ≥ 생존 성도 수 조건 충족 시 악 팀 승리 화면이 표시되는가
-  - [ ] 게임 종료 화면에서 모든 역할이 공개되는가
-  - [ ] 게임 리셋 후 대기실에서 새 게임을 시작할 수 있는가
+  - [x] 진행자가 페이즈 전환 시작 시 모든 참가자 화면에 10초 카운트다운이 동기화 표시되는가 _(다중 클라 실측)_
+  - [x] 카운트다운 중 진행자가 [전환 취소] 시 전원 화면에서 전환이 중단되는가
+  - [x] 카운트다운 완료 후 모든 참가자 화면이 동시에 갱신되는가 _(커밋 멱등 — 시스템 메시지 1건)_
+  - [x] 이단(이단 대장 포함) 전원 탈락 시 선 팀 승리 화면이 표시되는가
+  - [x] 생존 이단 수 ≥ 생존 성도 수 조건 충족 시 악 팀 승리 화면이 표시되는가
+  - [x] 게임 종료 화면에서 모든 역할이 공개되는가 _(진행 중 getGameResult는 null — 미공개 실증)_
+  - [x] 게임 리셋 후 대기실에서 새 게임을 시작할 수 있는가 _(리셋→waiting→시작→역할 재배분)_
 
 - **Task 013-1: 참가자 접속 관리 및 강퇴 기능 구현**
   - `lib/game/hooks/useGamePresence.ts` — Supabase Realtime Presence 구독 훅
