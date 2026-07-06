@@ -322,31 +322,28 @@
   - [x] 동률 시 진행자 수동 선택 모달이 표시되는가
   - [x] 개별 투표가 anon 직접조회/broadcast 프레임에 노출되지 않는가 _(REST 401 + 원시 WebSocket 프레임 실증)_
 
-- **Task 012: 밤 행동 시스템 구현**
-  - 밤 행동 Server Action: game_night_actions UPSERT (권한 검증 — 권한 없는 역할 요청은 거부/no-op)
-  - 역할별 행동 처리 (UI 외형은 전원 동일, 실제 동작만 권한자 한정)
-    - 이단 대장(heretic_leader)만: 제거 대상 선택 → `action_type: 'kill'` (일반 이단은 비밀 채팅으로 작전만, 제거 선택 불가)
-    - 목사님(pastor): 조사 대상 선택 → `action_type: 'investigate'`
-    - 권사님(deaconess): 보호 대상 선택 → `action_type: 'protect'`
-    - 장로님(elder)·성도·일반 이단: 밤 행동 없음 — 외형 동일한 no-op 대기 패널
-  - 목사님 조사 결과 처리
-    - 대상이 이단 팀(`heretic` 또는 `heretic_leader`)이면 "이단입니다", 그 외는 "성도입니다" 반환 (위장 없음 — 이단 대장도 "이단"으로 식별)
-    - 결과를 Sonner 토스트로 해당 플레이어에게만 표시
-  - 진행자 밤 행동 완료 현황 표시 (누가 완료했는지 체크 — 실제 권한자 기준)
-  - 밤 결과 처리 Server Action (진행자 "아침으로" 버튼)
-    - 보호 대상과 제거 대상이 겹치면 제거 무효
-    - 제거 대상 is_alive → false
-    - 시스템 메시지 발송 ("밤 사이 ○○님이 이단 세력에 의해 제거되었습니다")
-    - 승리 조건 체크 실행
+- **Task 012: 밤 행동 시스템 구현** ✅ - 완료 (auto-dev · 무차별 UI + 조사 격리)
+  - ✅ 밤 행동 Server Action `submitNightAction(token, targetId)` — 밤·생존·권한(canPerformNightAction) **서버 최종 검증**, 역할→action_type 매핑, game_night_actions UPSERT(onConflict room_id,phase_number,actor_id). game_night_actions는 anon 완전 차단(RLS 정책 0개)
+  - ✅ 역할별 행동 처리 (**UI 외형 전원 동일 — actionLabel "밤 행동" 고정·canAct(boolean)만**, 실제 동작만 권한자)
+    - 이단 대장→`kill`, 목사님→`investigate`, 권사님→`protect`. 그 외(장로님·성도·일반 이단)는 canAct=false no-op(외형 동일)
+    - 권한 없는 역할의 밤 행동 시도는 서버가 거부("밤에 할 수 있는 행동이 없습니다")
+  - ✅ 목사님 조사 결과 — 대상 `isHeretic`이면 "이단"(위장 없음: 이단 대장도 "이단"), 그 외 "성도". **`submitNightAction` 동기 응답으로 목사님 본인에게만**(Sonner 토스트) — DB·broadcast·타인에게 절대 미기록/미노출
+  - ✅ 진행자 밤 행동 완료 현황 `getNightActionStatus(roomId, pin)` (PIN 게이트, 실제 권한자 기준) + NIGHT_ACTION_UPDATE 구독 재조회
+  - ✅ 밤 결과 처리 Server Action `resolveNight(roomId, pin)` (진행자 [밤 결과 처리])
+    - **보호 대상 == 제거 대상이면 제거 무효**(상쇄) → "밤 사이 아무도 제거되지 않았습니다"
+    - 제거 대상 `is_alive→false` + 시스템 메시지("밤 사이 ○○님이 이단 세력에 의해 제거되었습니다") + 승리 조건 체크 (Task 011 `resolveElimination`/`evaluateWinner` 재사용, reason='night'로 문구 분기)
+    - PIN 재검증·밤 상태 가드. status는 night 유지(밤→낮 전환은 Task 013 소관). 중복 처리는 멱등 가드(resolveElimination is_alive) + admin nightResolved 클라 가드
+  - ✅ NIGHT_ACTION_UPDATE broadcast는 집계(completedCount/total)만 — role/대상/조사결과 미포함
+  - ⚠️ **후속 백로그**: resolveNight 서버측 phase 처리 마커로 완전 멱등화(현재 admin 클라 가드·Task 013 전환 시 자연 해결), resolveNight no-op 재호출 응답 eliminatedId 정확도, useGameNight 미사용 집계 상태 정리
 
   ### 테스트 체크리스트
-  - [ ] 이단 대장의 제거 행동만 game_night_actions에 저장되고, 일반 이단의 제거 시도는 거부되는가
-  - [ ] 일반 이단·장로님·성도의 밤 행동 패널 외형이 권한자와 동일하게 보이는가 (무차별 UI)
-  - [ ] 권사님 보호 대상과 이단 대장 제거 대상이 같을 때 제거가 무효화되는가
-  - [ ] 목사님이 이단·이단 대장을 조사할 때 모두 "이단입니다"로 반환되는가 (위장 없음)
-  - [ ] 목사님이 선 팀(성도·장로님·권사님)을 조사할 때 "성도입니다"로 반환되는가
-  - [ ] 조사 결과가 목사님에게만 표시되는가
-  - [ ] 밤 행동 완료 후 진행자 대시보드에 완료 현황이 표시되는가
+  - [x] 이단 대장의 제거 행동만 game_night_actions에 저장되고, 일반 이단의 제거 시도는 거부되는가 _(raw fetch 우회 시도도 서버 거부·DB 미기록)_
+  - [x] 일반 이단·장로님·성도의 밤 행동 패널 외형이 권한자와 동일하게 보이는가 (무차별 UI) _(6역할 스크린샷 비교)_
+  - [x] 권사님 보호 대상과 이단 대장 제거 대상이 같을 때 제거가 무효화되는가
+  - [x] 목사님이 이단·이단 대장을 조사할 때 모두 "이단입니다"로 반환되는가 (위장 없음)
+  - [x] 목사님이 선 팀(성도·장로님·권사님)을 조사할 때 "성도입니다"로 반환되는가
+  - [x] 조사 결과가 목사님에게만 표시되는가 _(DB/broadcast/anon 직접조회 3중 격리 실증)_
+  - [x] 밤 행동 완료 후 진행자 대시보드에 완료 현황이 표시되는가
 
 - **Task 013: 페이즈 전환 및 승리 조건 구현**
   - 페이즈 전환 카운트다운 Server Action (F017)
