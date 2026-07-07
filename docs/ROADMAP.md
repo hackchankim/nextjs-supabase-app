@@ -383,23 +383,25 @@
   - [ ] 게임 중 강퇴 시 대상이 탈락 처리되고 승리 조건이 재검사되는가
   - [ ] 진행자가 아닌 참가자는 강퇴를 실행할 수 없는가 (권한 거부)
 
-- **Task 013-3: 참가자 대기실 자발적 퇴장 구현** - 우선순위
-  > 대기 중(`status='waiting'`) 참가자가 **본인 세션으로 스스로 퇴장**하는 기능(F021). 잘못 입장·변심한 참가자가 진행자 강퇴를 기다리지 않고 대기실을 정리할 수 있게 한다. 게임 시작(day/night) 후 이탈은 범위 밖(진행 중 DELETE는 역할 배분·투표·밤 행동 FK·승리 판정을 깨뜨림 — 관전/탈락 처리인 Task 013-1/013-2 소관). **강퇴(Task 013-1)와 DELETE+`PLAYER_LEFT` 메커니즘을 공유**하도록 설계한다. (독립 실행 가능 — Task 013-1보다 먼저 착수 가능)
-  - `lib/game/realtime.ts` — `GAME_EVENTS.PLAYER_LEFT`(`"player_left"`) + `PlayerLeftPayload{ playerId }`(role/token 미포함)
-  - `lib/game/actions.ts`:
+- **Task 013-3: 참가자 대기실 자발적 퇴장 구현** ✅ - 완료 (auto-dev · F021)
+  > 대기 중(`status='waiting'`) 참가자가 **본인 세션으로 스스로 퇴장**하는 기능(F021). 게임 시작(day/night) 후 이탈은 범위 밖(진행 중 DELETE는 FK·승리 판정을 깨뜨림 — 서버가 차단). **강퇴(Task 013-1)와 DELETE+`PLAYER_LEFT` 메커니즘 공유**.
+  - ✅ `lib/game/realtime.ts` — `GAME_EVENTS.PLAYER_LEFT`(`"player_left"`) + `PlayerLeftPayload{ playerId }`(role/token 미포함)
+  - ✅ `lib/game/actions.ts`:
     - (내부·공유) `removePlayerFromRoom(supabase, roomId, playerId)` — `game_players` DELETE + `PLAYER_LEFT` broadcast. **Task 013-1 대기실 강퇴가 재사용**
-    - (export) `leaveGame(token)` — `getSenderContext`로 본인 확인(없으면 멱등 `{ok:true}`) → **방 `status='waiting'` 가드**(진행 중 거부) → 본인 레코드만 `removePlayerFromRoom` → 판별 유니온 반환. **인증은 진행자 PIN이 아니라 본인 session_token**(타인 제거 불가)
-  - `app/game/waiting/page.tsx` — 하단에 **[나가기]** 버튼(`variant="outline"`) + 오발 방지 확인. 성공 시 `clearSession()`→`router.replace("/game")`, 게임 시작됨 실패 시 `/game/play`로. 기존 room 채널 구독에 **`PLAYER_LEFT` → 목록에서 filter 제거** 추가(유령 잔존 방지)
-  - `app/game/admin/page.tsx` — room 채널 구독에 **`PLAYER_LEFT` → `players` filter 제거 + `onlineIds` 제거** 추가(진행자 화면 실시간 반영)
-  - 재사용: `useGameSession.clearSession`, `getSenderContext`, `getPlayerBySession` null 자동복원(재접속 시 입장 폼 복귀), `broadcastToRoom`+`roomChannel`. 스키마 변경 없음
-  - ⚠️ **정합성 가드**: `status='waiting'`에서만 DELETE(서버 최종 방어) · 본인 토큰으로 본인만 삭제 · 멱등 · 정원(count 기반) 자동 회복 · 닉네임 unique 재사용 안전
+    - (export) `leaveGame(token)` — `getSenderContext` 본인 확인(없으면 멱등 `{ok:true}`) → **`status='waiting'` 가드**(진행 중 거부) → 본인 레코드만 삭제. **본인 session_token 인증**(타인 제거 불가)
+    - `startGame` 보강 — 역할 배정 UPDATE 행수 검증: 스냅샷(getRoomPlayers) 이후 참가자가 이탈(자발적 퇴장·강퇴)해 배분표 총원과 어긋나면 day 전환을 중단("참가자 구성이 변경되었습니다. 다시 시작해주세요"). **TOCTOU 레이스로 인한 승리 판정 왜곡 방지**(재시작으로 복구)
+  - ✅ `app/game/waiting/page.tsx` — [나가기] 버튼(`variant="outline"`·confirm·pending). 성공 시 `clearSession()`→`/game`, 게임 시작됨(에러 "시작") 시 `/game/play`, 그 외 에러는 대기실에 머무르며 문구 표시. `PLAYER_LEFT` 구독으로 목록 filter 제거
+  - ✅ `app/game/admin/page.tsx` — `PLAYER_LEFT` 구독으로 `players` filter 제거 + `onlineIds` 정리(진행자 화면 실시간 반영)
+  - ✅ 재사용: `useGameSession.clearSession`, `getSenderContext`, `getPlayerBySession` null 자동복원(재접속 시 입장 폼 복귀), `broadcastToRoom`+`roomChannel`. 스키마 변경 없음
+  - ✅ **정합성/보안**: `status='waiting'`에서만 DELETE · 본인만 삭제 · 멱등 · PLAYER_LEFT 페이로드에 secret 없음. code-reviewer 지적(TOCTOU·클라 에러 미구분) 반영
+  - ⚠️ **QA 환경 제약**: 이 세션에 Playwright MCP 부재 → qa-tester가 **실제 dev 서버 Server Action raw 호출 + 실제 Realtime WebSocket 구독**으로 서버·보안 로직을 실증 검증(아래 핵심 7항목 PASS). **브라우저 화면전환·콘솔에러·startGame 레이스 재현은 미확인** → Task 014(통합 테스트)에서 Playwright로 마저 확인 권장
 
   ### 테스트 체크리스트
-  - [ ] 대기실 [나가기] 시 본인 세션이 정리되고 입장 화면으로 복귀하는가 (localStorage 토큰 제거)
-  - [ ] 나간 참가자가 다른 참가자·진행자 목록에서 실시간으로 제거되는가 (PLAYER_LEFT)
-  - [ ] 퇴장 후 같은 닉네임으로 재입장이 가능한가 (정원·닉네임 회복)
-  - [ ] 게임 시작(day) 상태에서 `leaveGame` 직접 호출 시 거부되고 DB가 변경되지 않는가
-  - [ ] 남의 session_token으로 타인을 제거할 수 없는가 (본인만 삭제)
+  - [x] 대기실 [나가기] 시 본인 세션이 정리되고 입장 화면으로 복귀하는가 (localStorage 토큰 제거) _(서버 로직·세션 정리 로직 확인 · 화면전환은 Playwright 부재로 미관측)_
+  - [x] 나간 참가자가 다른 참가자·진행자 목록에서 실시간으로 제거되는가 (PLAYER_LEFT) _(실제 WebSocket으로 player_left {playerId} 도달 실증)_
+  - [x] 퇴장 후 같은 닉네임으로 재입장이 가능한가 (정원·닉네임 회복)
+  - [x] 게임 시작(day) 상태에서 `leaveGame` 직접 호출 시 거부되고 DB가 변경되지 않는가 _(raw 호출 실증)_
+  - [x] 남의 session_token으로 타인을 제거할 수 없는가 (본인만 삭제) _(raw 호출 실증)_
 
 - **Task 013-2: 세션 재접속·이어하기 완성** - 우선순위
   > 이탈(화면 잠금·백그라운드·네트워크 끊김·탭 종료·새로고침) 후 복귀한 참가자가 **닉네임 재입력 없이 게임에 매끄럽게 이어붙는** 경험을 완성한다. Task 008에서 기본 라우팅 게이트(지각 입장 차단·상태 기반 이동)는 이미 확립됐고, 이 태스크는 play 화면이 실데이터가 된 뒤(Task 010~013) **내 실제 역할·현재 페이즈·채팅 이력까지 복원**하는 부분을 마무리한다. (설계 원칙: Phase 3 상단 "실시간·재접속 설계 원칙" 참조)
