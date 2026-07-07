@@ -13,7 +13,7 @@ interface UseGameSessionResult {
   /** 세션 복원(검증) 진행 중 여부 */
   loading: boolean;
   /**
-   * localStorage에 저장된 원본 세션 토큰. Server Action(getMyRole/sendMessage/getMessages 등)
+   * localStorage에 저장된 원본 세션 토큰. Server Action(getResumeState/sendMessage/getMessages 등)
    * 호출 시 필요하다. player가 null이면 항상 null.
    */
   sessionToken: string | null;
