@@ -1,16 +1,21 @@
 name: Claude PR Review
 
 # PR 이 열리거나 갱신될 때 Claude 가 변경분을 자동으로 코드리뷰하고 코멘트를 남긴다.
-# 선행 작업(수동): GitHub App 설치 + repo Secrets 에 ANTHROPIC_API_KEY 등록.
+#
+# ⚠️ 현재 비활성화됨(workflow_dispatch 수동 전용) — Claude Code GitHub App 미설치로
+#    자동 실행 시 "Claude Code is not installed on this repository" 오류가 나기 때문.
+#    재활성화하려면: ① https://github.com/apps/claude 에서 App 설치
+#    ② repo Secrets 에 ANTHROPIC_API_KEY 등록 ③ 아래 on: 을 pull_request(opened/synchronize)로 복원.
+#    로컬 /dev:auto-dev 의 code-reviewer 가 이미 정적 리뷰를 수행하므로 선택 사항이다.
 
 on:
-  pull_request:
-    types: [opened, synchronize]
+  workflow_dispatch:
 
 permissions:
   contents: read
   pull-requests: write
   issues: write
+  id-token: write
 
 concurrency:
   group: claude-review-${{ github.event.pull_request.number }}

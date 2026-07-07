@@ -9,6 +9,9 @@ import {
   type ChatMessagePayload,
   type GameEndedPayload,
   type NightActionUpdatePayload,
+  type PhaseChangedPayload,
+  type PhaseTransitionScheduledPayload,
+  type PlayerLeftPayload,
   type VoteUpdatePayload,
 } from "@/lib/game/realtime";
 import {
@@ -45,6 +48,9 @@ const NICKNAME_MAX_LENGTH = 20;
 
 /** 진행자 PIN 자릿수 */
 const ADMIN_PIN_LENGTH = 4;
+
+/** 페이즈 전환 예약 후 실제 확정까지의 카운트다운 지연 (ms) — 전 클라이언트 공통 기준(transition_at) */
+const PHASE_TRANSITION_DELAY_MS = 10_000;
 
 /** 0000~9999 범위의 4자리 PIN 문자열을 생성한다. */
 function generateAdminPin(): string {
@@ -190,10 +196,34 @@ export async function joinGame(nickname: string): Promise<JoinGameResult> {
 
 type VerifyAdminPinResult = { ok: true; roomId: string } | { ok: false; error: string };
 
-/** 진행자 PIN을 검증한다. */
-export async function verifyAdminPin(pin: string): Promise<VerifyAdminPinResult> {
+/**
+ * 진행자 PIN을 검증한다.
+ * - roomId를 주면 **그 방을 직접** 조회해 검증한다(상태 무관). 종료(ended)된 방도 찾을 수 있어야
+ *   게임 종료 후 리셋 등 진행자 액션이 동작한다. 이미 방을 관리 중인 진행자 액션은 반드시 roomId를 넘긴다.
+ * - roomId가 없으면(최초 PIN 입장 화면) getOrCreateActiveRoom으로 현재 활성 방을 검증한다.
+ */
+export async function verifyAdminPin(
+  pin: string,
+  roomId?: string,
+): Promise<VerifyAdminPinResult> {
   try {
-    const room = await getOrCreateActiveRoom();
+    let room: { id: string; admin_pin: string };
+
+    if (roomId) {
+      const supabase = createAdminClient();
+      const { data, error } = await supabase
+        .from("game_rooms")
+        .select("id, admin_pin")
+        .eq("id", roomId)
+        .maybeSingle();
+
+      if (error || !data) {
+        return { ok: false, error: "게임 방을 찾을 수 없습니다" };
+      }
+      room = { id: data.id, admin_pin: data.admin_pin };
+    } else {
+      room = await getOrCreateActiveRoom();
+    }
 
     if (room.admin_pin !== pin) {
       return { ok: false, error: "PIN이 올바르지 않습니다" };
@@ -304,7 +334,7 @@ type StartGameResult = { ok: true } | { ok: false; error: string };
  * 방 상태를 낮(day)/1페이즈로 전환 → 참가자에게 Broadcast로 알림.
  */
 export async function startGame(roomId: string, pin: string): Promise<StartGameResult> {
-  const verifyResult = await verifyAdminPin(pin);
+  const verifyResult = await verifyAdminPin(pin, roomId);
   if (!verifyResult.ok) {
     return verifyResult;
   }
@@ -344,12 +374,21 @@ export async function startGame(roomId: string, pin: string): Promise<StartGameR
       supabase
         .from("game_players")
         .update({ role: roles[index] })
-        .eq("id", player.id),
+        .eq("id", player.id)
+        .select("id"),
     );
     const updateResults = await Promise.all(updates);
     const updateError = updateResults.find((result) => result.error)?.error;
     if (updateError) {
       throw new Error(`역할 배분 실패: ${updateError.message}`);
+    }
+
+    // 스냅샷(getRoomPlayers) 이후 참가자가 나가면(자발적 퇴장·강퇴) 해당 역할 UPDATE가 0행이 되어
+    // 배분표 총원과 실제 참가자 수가 어긋난다 → 승리 판정이 왜곡되므로 day 전환을 하지 않고 중단한다.
+    // (진행자가 다시 [게임 시작]을 누르면 현재 인원으로 재배분되어 정상 복구된다.)
+    const rosterChanged = updateResults.some((result) => (result.data?.length ?? 0) === 0);
+    if (rosterChanged) {
+      return { ok: false, error: "참가자 구성이 변경되었습니다. 다시 시작해주세요" };
     }
 
     const { error: roomUpdateError } = await supabase
@@ -415,6 +454,75 @@ async function getSenderContext(
     role: player.role as PlayerRole | null,
     isAlive: player.is_alive,
   };
+}
+
+/**
+ * 참가자를 방에서 제거한다(대기실 전용) — game_players 레코드를 DELETE하고
+ * PLAYER_LEFT를 broadcast해 전원 목록에서 실시간으로 제거되게 한다.
+ * export하지 않는다 — 항상 검증된 진입점(leaveGame 등)을 통해서만 호출한다.
+ * Task 013-1의 진행자 대기실 강퇴가 이 헬퍼를 PIN 게이트로 그대로 재사용한다.
+ */
+async function removePlayerFromRoom(
+  supabase: AdminClient,
+  roomId: string,
+  playerId: string,
+): Promise<void> {
+  const { error } = await supabase
+    .from("game_players")
+    .delete()
+    .eq("id", playerId)
+    .eq("room_id", roomId);
+
+  if (error) {
+    throw new Error(`참가자 제거 실패: ${error.message}`);
+  }
+
+  const payload: PlayerLeftPayload = { playerId };
+  await broadcastToRoom(roomId, GAME_EVENTS.PLAYER_LEFT, payload);
+}
+
+type LeaveGameResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * 참가자가 대기실에서 스스로 나간다(F021) — 본인 session_token으로 인증하며
+ * 자기 자신만 삭제할 수 있다(타인 제거 불가). 대기 중(status='waiting')에만 허용한다:
+ * 진행 중(day/night)에 참가자를 DELETE하면 역할 배분·투표·밤 행동의 FK와 승리 판정이
+ * 깨지므로 서버가 최종 방어선으로 차단한다(진행 중 이탈은 관전/탈락 처리 영역).
+ */
+export async function leaveGame(token: string): Promise<LeaveGameResult> {
+  try {
+    const supabase = createAdminClient();
+    const sender = await getSenderContext(supabase, token);
+
+    // 이미 나갔거나 세션이 무효하면 멱등하게 성공 처리한다(클라이언트는 정리를 계속 진행).
+    if (!sender) {
+      return { ok: true };
+    }
+
+    const { data: room, error: roomError } = await supabase
+      .from("game_rooms")
+      .select("status")
+      .eq("id", sender.roomId)
+      .maybeSingle();
+
+    if (roomError || !room) {
+      return { ok: false, error: "게임 방을 찾을 수 없습니다" };
+    }
+
+    if (room.status !== "waiting") {
+      return { ok: false, error: "게임이 시작되어 나갈 수 없습니다" };
+    }
+
+    // 본인 id만 삭제 — session_token으로 확보한 자기 자신만 제거 가능하다.
+    await removePlayerFromRoom(supabase, sender.roomId, sender.id);
+
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
+  }
 }
 
 /**
@@ -752,7 +860,7 @@ async function resolveElimination(
   supabase: AdminClient,
   roomId: string,
   targetId: string,
-  reason: "vote" | "night",
+  reason: "vote" | "night" | "manual",
 ): Promise<Winner | null> {
   // is_alive=true 조건을 걸어 멱등성을 확보한다 — 이미 탈락한 대상(중복 마감·버튼 재클릭·
   // 관리자 탭 중복)이면 갱신 행이 0건이 되어, 시스템 메시지·PLAYER_ELIMINATED broadcast를
@@ -774,12 +882,14 @@ async function resolveElimination(
     return evaluateWinner(supabase, roomId);
   }
 
-  // 탈락 사유별 시스템 메시지 문구 분기 — vote(낮 투표 마감)와 night(밤 처리 결과)는
-  // 참가자에게 서로 다른 맥락을 전달해야 하므로 문구를 구분한다.
+  // 탈락 사유별 시스템 메시지 문구 분기 — vote(낮 투표 마감)·night(밤 처리 결과)·
+  // manual(진행자 수동 탈락)은 참가자에게 서로 다른 맥락을 전달해야 하므로 문구를 구분한다.
   const content =
     reason === "vote"
       ? `${target.nickname}님이 공동체를 떠났습니다`
-      : `밤 사이 ${target.nickname}님이 이단 세력에 의해 제거되었습니다`;
+      : reason === "night"
+        ? `밤 사이 ${target.nickname}님이 이단 세력에 의해 제거되었습니다`
+        : `${target.nickname}님이 탈락 처리되었습니다`;
 
   const { data: message, error: messageError } = await supabase
     .from("game_messages")
@@ -815,6 +925,19 @@ async function resolveElimination(
  * export하지 않는다(resolveElimination 내부에서만 호출).
  */
 async function evaluateWinner(supabase: AdminClient, roomId: string): Promise<Winner | null> {
+  // 이미 종료된 게임이면 재판정·재브로드캐스트하지 않는다 — 종료 후에도 여러 진입점
+  // (commitPhaseTransition·manualEliminate 등)에서 이 함수가 다시 불릴 수 있는데, 중복
+  // GAME_ENDED가 나가면 참가자가 닫은 종료 오버레이가 강제로 재오픈된다.
+  const { data: room } = await supabase
+    .from("game_rooms")
+    .select("status, winner")
+    .eq("id", roomId)
+    .maybeSingle();
+
+  if (room?.status === "ended") {
+    return (room.winner as Winner | null) ?? null;
+  }
+
   const { data: players, error } = await supabase
     .from("game_players")
     .select("role, is_alive")
@@ -829,10 +952,19 @@ async function evaluateWinner(supabase: AdminClient, roomId: string): Promise<Wi
   );
 
   if (winner) {
-    await supabase.from("game_rooms").update({ status: "ended", winner }).eq("id", roomId);
+    // 조건부 UPDATE(status가 아직 ended가 아닐 때만) — 여러 진입점의 동시 호출에도 첫 확정만
+    // GAME_ENDED를 브로드캐스트한다. 예약된 페이즈 전환도 함께 정리해 stale한 커밋을 무력화한다.
+    const { data: endedRows } = await supabase
+      .from("game_rooms")
+      .update({ status: "ended", winner, transition_to: null, transition_at: null })
+      .eq("id", roomId)
+      .neq("status", "ended")
+      .select("id");
 
-    const payload: GameEndedPayload = { winner };
-    await broadcastToRoom(roomId, GAME_EVENTS.GAME_ENDED, payload);
+    if (endedRows && endedRows.length > 0) {
+      const payload: GameEndedPayload = { winner };
+      await broadcastToRoom(roomId, GAME_EVENTS.GAME_ENDED, payload);
+    }
   }
 
   return winner;
@@ -979,7 +1111,7 @@ type CloseVotingResult =
  * (진행자가 resolveVoteElimination으로 수동 확정).
  */
 export async function closeVoting(roomId: string, pin: string): Promise<CloseVotingResult> {
-  const verifyResult = await verifyAdminPin(pin);
+  const verifyResult = await verifyAdminPin(pin, roomId);
   if (!verifyResult.ok) {
     return verifyResult;
   }
@@ -1055,7 +1187,7 @@ export async function resolveVoteElimination(
   pin: string,
   targetId: string,
 ): Promise<ResolveVoteEliminationResult> {
-  const verifyResult = await verifyAdminPin(pin);
+  const verifyResult = await verifyAdminPin(pin, roomId);
   if (!verifyResult.ok) {
     return verifyResult;
   }
@@ -1276,7 +1408,7 @@ export async function getNightActionStatus(
   roomId: string,
   pin: string,
 ): Promise<GetNightActionStatusResult> {
-  const verifyResult = await verifyAdminPin(pin);
+  const verifyResult = await verifyAdminPin(pin, roomId);
   if (!verifyResult.ok) {
     return verifyResult;
   }
@@ -1352,7 +1484,7 @@ type ResolveNightResult =
  * 것으로 보고 거부해 중복·오호출(버튼 재클릭 등)을 막는다.
  */
 export async function resolveNight(roomId: string, pin: string): Promise<ResolveNightResult> {
-  const verifyResult = await verifyAdminPin(pin);
+  const verifyResult = await verifyAdminPin(pin, roomId);
   if (!verifyResult.ok) {
     return verifyResult;
   }
@@ -1423,5 +1555,442 @@ export async function resolveNight(roomId: string, pin: string): Promise<Resolve
       ok: false,
       error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
     };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 페이즈 전환·승리 조건·리셋 (Task 013)
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface RoomState {
+  status: GameStatus;
+  phaseNumber: number;
+  transitionTo: GameStatus | null;
+  transitionAt: string | null;
+  winner: Winner | null;
+}
+
+/**
+ * game_rooms의 공개 필드 스냅샷을 조회한다 (admin_pin은 절대 포함하지 않는다).
+ * status/phaseNumber/transition 관련 필드/winner는 모두 공개 정보라 인증 없이 누구나 조회할 수 있다.
+ * play/admin 페이지 마운트 및 재접속 시의 초기 스냅샷 용도.
+ */
+export async function getRoomState(roomId: string): Promise<RoomState | null> {
+  try {
+    const supabase = createAdminClient();
+
+    const { data: room, error } = await supabase
+      .from("game_rooms")
+      .select("status, phase_number, transition_to, transition_at, winner")
+      .eq("id", roomId)
+      .maybeSingle();
+
+    if (error || !room) {
+      return null;
+    }
+
+    return {
+      status: room.status as GameStatus,
+      phaseNumber: room.phase_number,
+      transitionTo: room.transition_to as GameStatus | null,
+      transitionAt: room.transition_at,
+      winner: room.winner as Winner | null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+type StartPhaseTransitionResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * 진행자가 페이즈 전환을 예약한다(PIN 게이트) — 현재 day/night 상태에서만 가능하며,
+ * 이미 진행 중인 상태로의 재전환은 거부한다. transition_at은 now+10초로 설정하고,
+ * 전 클라이언트가 이 값을 기준으로 동일하게 카운트다운을 표시한다.
+ */
+export async function startPhaseTransition(
+  roomId: string,
+  pin: string,
+  nextStatus: "day" | "night",
+): Promise<StartPhaseTransitionResult> {
+  const verifyResult = await verifyAdminPin(pin, roomId);
+  if (!verifyResult.ok) {
+    return verifyResult;
+  }
+  if (verifyResult.roomId !== roomId) {
+    return { ok: false, error: "PIN이 올바르지 않습니다" };
+  }
+
+  try {
+    const supabase = createAdminClient();
+
+    const { data: room, error: roomError } = await supabase
+      .from("game_rooms")
+      .select("status")
+      .eq("id", roomId)
+      .maybeSingle();
+
+    if (roomError || !room) {
+      return { ok: false, error: "게임 방을 찾을 수 없습니다" };
+    }
+
+    if (room.status !== "day" && room.status !== "night") {
+      return { ok: false, error: "전환할 수 없는 상태입니다" };
+    }
+
+    if (room.status === nextStatus) {
+      return { ok: false, error: "전환할 수 없는 상태입니다" };
+    }
+
+    const transitionAt = new Date(Date.now() + PHASE_TRANSITION_DELAY_MS).toISOString();
+
+    const { error: updateError } = await supabase
+      .from("game_rooms")
+      .update({ transition_to: nextStatus, transition_at: transitionAt })
+      .eq("id", roomId);
+
+    if (updateError) {
+      return { ok: false, error: `전환 예약 실패: ${updateError.message}` };
+    }
+
+    const payload: PhaseTransitionScheduledPayload = { transitionTo: nextStatus, transitionAt };
+    await broadcastToRoom(roomId, GAME_EVENTS.PHASE_TRANSITION_SCHEDULED, payload);
+
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
+  }
+}
+
+type CancelPhaseTransitionResult = { ok: true } | { ok: false; error: string };
+
+/** 진행자가 예약된 페이즈 전환을 취소한다(PIN 게이트) — transition_to/transition_at을 null로 되돌린다. */
+export async function cancelPhaseTransition(
+  roomId: string,
+  pin: string,
+): Promise<CancelPhaseTransitionResult> {
+  const verifyResult = await verifyAdminPin(pin, roomId);
+  if (!verifyResult.ok) {
+    return verifyResult;
+  }
+  if (verifyResult.roomId !== roomId) {
+    return { ok: false, error: "PIN이 올바르지 않습니다" };
+  }
+
+  try {
+    const supabase = createAdminClient();
+
+    const { error: updateError } = await supabase
+      .from("game_rooms")
+      .update({ transition_to: null, transition_at: null })
+      .eq("id", roomId);
+
+    if (updateError) {
+      return { ok: false, error: `전환 취소 실패: ${updateError.message}` };
+    }
+
+    await broadcastToRoom(roomId, GAME_EVENTS.PHASE_TRANSITION_CANCELLED, {});
+
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
+  }
+}
+
+type CommitPhaseTransitionResult =
+  | { ok: true; applied: boolean }
+  | { ok: false; error: string };
+
+/**
+ * 예약된 페이즈 전환을 확정한다. **PIN 없음** — 모든 클라이언트가 transition_at 경과 시
+ * 자동으로 호출하는 구조이므로 인증 없이 안전하게 멱등적으로 동작해야 한다.
+ *
+ * 경합 방지: `.not("transition_to","is",null)` 조건부 UPDATE + `.select()`로 실제 갱신된
+ * 행이 있는지 확인한다. 여러 클라이언트가 거의 동시에 호출해도 transition_to가 이미 null인
+ * 두 번째 이후 호출은 매칭 행이 0개가 되어 `applied:false`를 반환한다 — 시스템 메시지·
+ * PHASE_CHANGED broadcast·evaluateWinner는 첫 호출에서만 한 번 실행된다.
+ */
+export async function commitPhaseTransition(roomId: string): Promise<CommitPhaseTransitionResult> {
+  try {
+    const supabase = createAdminClient();
+
+    const { data: room, error: roomError } = await supabase
+      .from("game_rooms")
+      .select("status, phase_number, transition_to, transition_at")
+      .eq("id", roomId)
+      .maybeSingle();
+
+    if (roomError || !room) {
+      return { ok: false, error: "게임 방을 찾을 수 없습니다" };
+    }
+
+    if (!room.transition_to || !room.transition_at) {
+      return { ok: true, applied: false };
+    }
+
+    if (Date.now() < Date.parse(room.transition_at)) {
+      return { ok: true, applied: false };
+    }
+
+    const nextStatus = room.transition_to as "day" | "night";
+    const nextPhaseNumber = nextStatus === "day" ? room.phase_number + 1 : room.phase_number;
+
+    // 조건부 UPDATE — transition_to가 이미 null로 바뀐(다른 호출이 먼저 처리한) 경우 0행 매칭.
+    const { data: updatedRows, error: updateError } = await supabase
+      .from("game_rooms")
+      .update({
+        status: nextStatus,
+        phase_number: nextPhaseNumber,
+        transition_to: null,
+        transition_at: null,
+      })
+      .eq("id", roomId)
+      .not("transition_to", "is", null)
+      .select("id");
+
+    if (updateError) {
+      return { ok: false, error: `페이즈 전환 실패: ${updateError.message}` };
+    }
+
+    if (!updatedRows || updatedRows.length === 0) {
+      // 다른 클라이언트(또는 이전 호출)가 이미 처리했다 — 부작용을 반복하지 않는다(멱등).
+      return { ok: true, applied: false };
+    }
+
+    const content = nextStatus === "day" ? "낮이 밝았습니다" : "밤이 되었습니다";
+    const { data: message, error: messageError } = await supabase
+      .from("game_messages")
+      .insert({ room_id: roomId, player_id: null, channel: "system", content })
+      .select("id, created_at")
+      .single();
+
+    if (!messageError && message) {
+      const chatPayload: ChatMessagePayload = {
+        id: message.id,
+        channel: "system",
+        senderId: null,
+        senderNickname: "시스템",
+        text: content,
+        recipientId: null,
+        createdAt: message.created_at,
+      };
+      await broadcastToRoom(roomId, GAME_EVENTS.CHAT_MESSAGE, chatPayload);
+    }
+
+    const phasePayload: PhaseChangedPayload = { status: nextStatus, phaseNumber: nextPhaseNumber };
+    await broadcastToRoom(roomId, GAME_EVENTS.PHASE_CHANGED, phasePayload);
+
+    // 전환 직후 승리 조건을 재평가한다(밤 결과 미처리 등으로 놓친 상태 변화를 여기서도 확정).
+    await evaluateWinner(supabase, roomId);
+
+    return { ok: true, applied: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
+  }
+}
+
+type ManualEliminateResult =
+  | { ok: true; winner: Winner | null }
+  | { ok: false; error: string };
+
+/**
+ * 진행자가 참가자를 수동으로 탈락 처리한다(PIN 게이트, 이견 처리용) —
+ * 대상이 같은 방의 참가자인지 검증한 뒤 resolveElimination(reason="manual")을 재사용한다.
+ * 이미 탈락한 대상이면 resolveElimination의 is_alive=true 가드로 인해 멱등하게 처리된다.
+ */
+export async function manualEliminate(
+  roomId: string,
+  pin: string,
+  targetId: string,
+): Promise<ManualEliminateResult> {
+  const verifyResult = await verifyAdminPin(pin, roomId);
+  if (!verifyResult.ok) {
+    return verifyResult;
+  }
+  if (verifyResult.roomId !== roomId) {
+    return { ok: false, error: "PIN이 올바르지 않습니다" };
+  }
+
+  try {
+    const supabase = createAdminClient();
+
+    if (!UUID_RE.test(targetId)) {
+      return { ok: false, error: "대상을 확인해주세요" };
+    }
+
+    // 진행 중(day/night)에만 수동 탈락 가능 — waiting에서 탈락시키면 startGame이 is_alive를
+    // 되돌리지 않아 게임 시작 시 사망 상태가 되고, ended에서는 evaluateWinner 재실행을 유발한다.
+    const { data: room, error: roomError } = await supabase
+      .from("game_rooms")
+      .select("status")
+      .eq("id", roomId)
+      .maybeSingle();
+
+    if (roomError || !room) {
+      return { ok: false, error: "게임 방을 찾을 수 없습니다" };
+    }
+
+    if (room.status !== "day" && room.status !== "night") {
+      return { ok: false, error: "진행 중인 게임에서만 탈락 처리할 수 있습니다" };
+    }
+
+    const { data: target, error: targetError } = await supabase
+      .from("game_players")
+      .select("id, room_id")
+      .eq("id", targetId)
+      .maybeSingle();
+
+    if (targetError || !target || target.room_id !== roomId) {
+      return { ok: false, error: "대상을 확인해주세요" };
+    }
+
+    const winner = await resolveElimination(supabase, roomId, targetId, "manual");
+
+    return { ok: true, winner };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
+  }
+}
+
+type ResetGameResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * 진행자가 게임을 초기화한다(PIN 게이트) — 투표/밤 행동/채팅 기록을 삭제하고 참가자의
+ * role/is_alive를 초기화한 뒤 방 상태를 waiting으로 되돌린다. **참가자 레코드 자체는
+ * 유지한다**(행사 재시작 시 닉네임을 다시 입력하지 않아도 되도록).
+ */
+export async function resetGame(roomId: string, pin: string): Promise<ResetGameResult> {
+  const verifyResult = await verifyAdminPin(pin, roomId);
+  if (!verifyResult.ok) {
+    return verifyResult;
+  }
+  if (verifyResult.roomId !== roomId) {
+    return { ok: false, error: "PIN이 올바르지 않습니다" };
+  }
+
+  try {
+    const supabase = createAdminClient();
+
+    const { error: votesError } = await supabase
+      .from("game_votes")
+      .delete()
+      .eq("room_id", roomId);
+    if (votesError) {
+      return { ok: false, error: `투표 기록 초기화 실패: ${votesError.message}` };
+    }
+
+    const { error: nightActionsError } = await supabase
+      .from("game_night_actions")
+      .delete()
+      .eq("room_id", roomId);
+    if (nightActionsError) {
+      return { ok: false, error: `밤 행동 기록 초기화 실패: ${nightActionsError.message}` };
+    }
+
+    const { error: messagesError } = await supabase
+      .from("game_messages")
+      .delete()
+      .eq("room_id", roomId);
+    if (messagesError) {
+      return { ok: false, error: `채팅 기록 초기화 실패: ${messagesError.message}` };
+    }
+
+    const { error: playersError } = await supabase
+      .from("game_players")
+      .update({ role: null, is_alive: true })
+      .eq("room_id", roomId);
+    if (playersError) {
+      return { ok: false, error: `참가자 초기화 실패: ${playersError.message}` };
+    }
+
+    const { error: roomError } = await supabase
+      .from("game_rooms")
+      .update({
+        status: "waiting",
+        phase_number: 0,
+        winner: null,
+        transition_to: null,
+        transition_at: null,
+      })
+      .eq("id", roomId);
+    if (roomError) {
+      return { ok: false, error: `게임 방 초기화 실패: ${roomError.message}` };
+    }
+
+    await broadcastToRoom(roomId, GAME_EVENTS.GAME_RESET, {});
+
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
+  }
+}
+
+export interface GameResultPlayer {
+  id: string;
+  nickname: string;
+  role: PlayerRole | null;
+  isAlive: boolean;
+}
+
+export interface GameResult {
+  winner: Winner | null;
+  players: GameResultPlayer[];
+}
+
+/**
+ * 게임 종료 후 전원의 역할·생존 여부를 조회한다. **status !== 'ended'면 반드시 null을
+ * 반환한다** — 진행 중에 이 함수가 role을 유출하면 무차별 UI 원칙이 완전히 무너지므로
+ * 이 가드는 절대 제거하면 안 된다. 종료 후에는 역할 공개가 게임 스펙상 정상 동작이다.
+ */
+export async function getGameResult(roomId: string): Promise<GameResult | null> {
+  try {
+    const supabase = createAdminClient();
+
+    const { data: room, error: roomError } = await supabase
+      .from("game_rooms")
+      .select("status, winner")
+      .eq("id", roomId)
+      .maybeSingle();
+
+    if (roomError || !room || room.status !== "ended") {
+      return null;
+    }
+
+    const { data: players, error: playersError } = await supabase
+      .from("game_players")
+      .select("id, nickname, role, is_alive")
+      .eq("room_id", roomId)
+      .order("created_at");
+
+    if (playersError) {
+      return null;
+    }
+
+    return {
+      winner: room.winner as Winner | null,
+      players: (players ?? []).map((player) => ({
+        id: player.id,
+        nickname: player.nickname,
+        role: player.role as PlayerRole | null,
+        isAlive: player.is_alive,
+      })),
+    };
+  } catch {
+    return null;
   }
 }

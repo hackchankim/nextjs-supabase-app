@@ -34,6 +34,16 @@ export const GAME_EVENTS = {
   GAME_ENDED: "game_ended",
   /** 밤 행동 완료 집계가 갱신되었을 때 (밤 권한자가 행동을 제출할 때마다) */
   NIGHT_ACTION_UPDATE: "night_action_update",
+  /** 진행자가 페이즈 전환을 예약했을 때 (10초 카운트다운 시작) */
+  PHASE_TRANSITION_SCHEDULED: "phase_transition_scheduled",
+  /** 진행자가 예약된 페이즈 전환을 취소했을 때 */
+  PHASE_TRANSITION_CANCELLED: "phase_transition_cancelled",
+  /** 페이즈 전환이 확정되었을 때 (낮⇄밤) */
+  PHASE_CHANGED: "phase_changed",
+  /** 진행자가 게임을 초기화(리셋)했을 때 */
+  GAME_RESET: "game_reset",
+  /** 참가자가 대기실에서 나갔을 때 (자발적 퇴장 또는 진행자 강퇴 — game_players 레코드 삭제) */
+  PLAYER_LEFT: "player_left",
 } as const;
 
 /** PLAYER_JOINED 이벤트 페이로드 — role/session_token 제외 */
@@ -41,6 +51,11 @@ export interface PlayerJoinedPayload {
   id: string;
   nickname: string;
   isAlive: boolean;
+}
+
+/** PLAYER_LEFT 이벤트 페이로드 — 목록에서 제거할 대상 id만(role/session_token 미포함) */
+export interface PlayerLeftPayload {
+  playerId: string;
 }
 
 /** GAME_STARTED 이벤트 페이로드 — 개인별 역할은 포함하지 않는다(무차별 UI 원칙) */
@@ -98,4 +113,19 @@ export interface NightActionUpdatePayload {
   completedCount: number;
   /** 이번 phase의 생존 밤 권한자(이단 대장·목사님·권사님) 총원 */
   total: number;
+}
+
+/**
+ * PHASE_TRANSITION_SCHEDULED 이벤트 페이로드 — 전환 예정 상태와 완료 예정 시각만 담는다.
+ * 모든 클라이언트는 transitionAt(ISO)을 기준으로 동일하게 카운트다운을 표시한다.
+ */
+export interface PhaseTransitionScheduledPayload {
+  transitionTo: "day" | "night";
+  transitionAt: string;
+}
+
+/** PHASE_CHANGED 이벤트 페이로드 — 개인별 역할은 포함하지 않는다(무차별 UI 원칙) */
+export interface PhaseChangedPayload {
+  status: "day" | "night";
+  phaseNumber: number;
 }

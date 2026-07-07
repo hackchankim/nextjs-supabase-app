@@ -1,15 +1,16 @@
 name: Claude Code
 
 # 이슈/PR 코멘트에 @claude 를 멘션하면 Claude 가 분석·구현하고 브랜치+PR 을 만든다.
-# 선행 작업(수동): GitHub App(https://github.com/apps/claude) 설치 + repo Secrets 에 ANTHROPIC_API_KEY 등록.
+#
+# ⚠️ 현재 비활성화됨(workflow_dispatch 수동 전용) — Claude Code GitHub App 미설치로
+#    자동 실행 시 "Claude Code is not installed on this repository" 오류가 나기 때문.
+#    재활성화하려면: ① https://github.com/apps/claude 에서 App 설치
+#    ② repo Secrets 에 ANTHROPIC_API_KEY 등록 ③ 아래 on: 을 원래 트리거로 복원
+#       (issue_comment/pull_request_review_comment/issues). 로컬 /dev:auto-dev 로도
+#       code-reviewer·qa-tester 리뷰가 이뤄지므로 이 클라우드 트랙은 선택 사항이다.
 
 on:
-  issue_comment:
-    types: [created]
-  pull_request_review_comment:
-    types: [created]
-  issues:
-    types: [opened, assigned]
+  workflow_dispatch:
 
 permissions:
   contents: write

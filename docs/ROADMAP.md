@@ -345,32 +345,26 @@
   - [x] 조사 결과가 목사님에게만 표시되는가 _(DB/broadcast/anon 직접조회 3중 격리 실증)_
   - [x] 밤 행동 완료 후 진행자 대시보드에 완료 현황이 표시되는가
 
-- **Task 013: 페이즈 전환 및 승리 조건 구현**
-  - 페이즈 전환 카운트다운 Server Action (F017)
-    - 전환 시작: game_rooms `transition_to`(다음 status) + `transition_at`(now + 10초) 설정
-    - 전 클라이언트는 `transition_at` 기준으로 동기화된 10초 카운트다운 표시
-    - 전환 취소: 진행자가 카운트다운 중 [전환 취소] → `transition_to`/`transition_at` null로 초기화
-  - 페이즈 전환 확정 Server Action (`lib/game/actions.ts`)
-    - 카운트다운 완료 시 game_rooms status 업데이트 (`day ↔ night`), `transition_*` 초기화
-    - phase_number 증가 (밤 → 낮 전환 시)
-    - 전환 시 시스템 메시지 자동 발송
-  - 승리 조건 체크 함수
-    - 선 팀 승리: 이단 역할 플레이어 전원 is_alive = false
-    - 악 팀 승리: 생존 이단 수 ≥ 생존 성도 수
-    - 조건 충족 시 game_rooms status → `'ended'`, winner 기록
-    - 전원 게임 종료 결과 화면 표시 (역할 전체 공개 포함)
-  - game_rooms Realtime 구독 → 모든 클라이언트에 상태 변경 반영
-  - 진행자 수동 탈락 처리 Server Action (이견 처리용)
-  - 게임 리셋 Server Action: 모든 테이블 데이터 초기화 + waiting 상태로 복귀
+- **Task 013: 페이즈 전환 및 승리 조건 구현** ✅ - 완료 (auto-dev · end-to-end 완성)
+  - ✅ 페이즈 전환 카운트다운 (F017): `startPhaseTransition(roomId, pin, nextStatus)` (PIN 재검증) → `transition_to`+`transition_at`(now+10초) → SCHEDULED broadcast. 전 클라 `transition_at` 기준 동기 10초 카운트다운(PhaseBanner). `cancelPhaseTransition`(PIN) → transition_* null → CANCELLED broadcast
+  - ✅ 페이즈 전환 확정 `commitPhaseTransition(roomId)` — **PIN 없이** transition_at 경과+transition_to 설정 시에만, **조건부 UPDATE(`.not(transition_to,is,null)`)로 멱등**(여러 클라 동시 호출에도 첫 호출만 부작용) → status day↔night, 밤→낮에 phase_number 증가, transition_* 초기화, 시스템 메시지 자동 발송, PHASE_CHANGED broadcast. **진행자 이탈에도 전환 보장**(어느 클라든 경과 시 호출)
+  - ✅ 승리 조건 — `evaluateWinner`(Task 011 재사용): 선 팀=이단 전멸, 악 팀=생존 이단≥성도. 충족 시 status='ended'+winner+GAME_ENDED broadcast. **이미 ended면 재판정·재브로드캐스트 안 함**(조건부 update `.neq(ended)`로 GAME_ENDED 1회만 — 종료 후 오버레이 강제 재오픈 방지) + transition_* 정리
+  - ✅ 전원 게임 종료 결과 화면 — `getGameResult(roomId)`는 **status='ended'에서만** 전원 닉네임+역할 공개(진행 중 호출 시 null — 역할 유출 차단). play 종료 오버레이에 전원 역할 그리드, winner/resultOpen 분리(닫아도 종료 상태 고정)
+  - ✅ 실시간 status 반영 — `getRoomState`(공개 스냅샷·role 없음) + PHASE_* Broadcast 구독(`useGamePhase`). play/admin이 마운트 스냅샷+델타로 실시간 페이즈 전환(낮=투표·전체채팅 / 밤=비밀채널·밤행동 자동 전환)
+  - ✅ 진행자 수동 탈락 `manualEliminate(roomId, pin, targetId)` (PIN·**day/night 가드**·resolveElimination reason='manual')
+  - ✅ 게임 리셋 `resetGame(roomId, pin)` — votes/night_actions/messages 삭제 + players(role=null, is_alive=true) + room(waiting/phase0/winner null) → GAME_RESET broadcast → play는 /game/waiting 이동. **참가자 레코드 유지**(행사 재시작 시 닉네임 재입력 불필요)
+  - ✅ **보안/정합 수정**: `verifyAdminPin`이 `getOrCreateActiveRoom`(ended 제외)으로 방을 재조회해 **게임 종료 후 리셋/진행자 액션이 PIN 불일치로 영구 실패**하던 치명 결함(qa-tester 발견)을 `verifyAdminPin(pin, roomId?)`로 해당 방 직접 검증하도록 수정(9개 PIN 액션 일괄)
+  - ⚠️ **후속 백로그**: resetGame RPC 원자화, RoomState.transitionTo 타입 좁히기, PhaseBanner lazy init 초기 플리커
+  - ⚠️ **선행 완료로 해소된 백로그**: play 페이지 phase 전환 실시간 동기화(Task 011 백로그) · Task 012 nightResolved/투표집계 phase별 초기화 — 이번 useGamePhase 도입으로 해결
 
   ### 테스트 체크리스트
-  - [ ] 진행자가 페이즈 전환 시작 시 모든 참가자 화면에 10초 카운트다운이 동기화 표시되는가
-  - [ ] 카운트다운 중 진행자가 [전환 취소] 시 전원 화면에서 전환이 중단되는가
-  - [ ] 카운트다운 완료 후 모든 참가자 화면이 동시에 갱신되는가
-  - [ ] 이단(이단 대장 포함) 전원 탈락 시 선 팀 승리 화면이 표시되는가
-  - [ ] 생존 이단 수 ≥ 생존 성도 수 조건 충족 시 악 팀 승리 화면이 표시되는가
-  - [ ] 게임 종료 화면에서 모든 역할이 공개되는가
-  - [ ] 게임 리셋 후 대기실에서 새 게임을 시작할 수 있는가
+  - [x] 진행자가 페이즈 전환 시작 시 모든 참가자 화면에 10초 카운트다운이 동기화 표시되는가 _(다중 클라 실측)_
+  - [x] 카운트다운 중 진행자가 [전환 취소] 시 전원 화면에서 전환이 중단되는가
+  - [x] 카운트다운 완료 후 모든 참가자 화면이 동시에 갱신되는가 _(커밋 멱등 — 시스템 메시지 1건)_
+  - [x] 이단(이단 대장 포함) 전원 탈락 시 선 팀 승리 화면이 표시되는가
+  - [x] 생존 이단 수 ≥ 생존 성도 수 조건 충족 시 악 팀 승리 화면이 표시되는가
+  - [x] 게임 종료 화면에서 모든 역할이 공개되는가 _(진행 중 getGameResult는 null — 미공개 실증)_
+  - [x] 게임 리셋 후 대기실에서 새 게임을 시작할 수 있는가 _(리셋→waiting→시작→역할 재배분)_
 
 - **Task 013-1: 참가자 접속 관리 및 강퇴 기능 구현**
   - `lib/game/hooks/useGamePresence.ts` — Supabase Realtime Presence 구독 훅
@@ -380,6 +374,7 @@
   - 대기실 강퇴 Server Action: 대상 `game_players` 레코드 DELETE → Realtime로 전원 목록 갱신
   - 게임 중 강퇴 Server Action: 대상 `is_alive=false` 처리 + 시스템 메시지 발송 + 승리 조건 체크 실행 (수동 탈락 처리와 동일 메커니즘, 사유만 구분)
   - 진행자 권한 검증 (PIN 보유자만 강퇴 가능)
+  - **대기실 강퇴는 Task 013-3의 `removePlayerFromRoom` 헬퍼 + `PLAYER_LEFT` 이벤트를 그대로 재사용**(중복 구현 금지 — 진행자 PIN 게이트만 추가)
 
   ### 테스트 체크리스트
   - [ ] 참가자 접속 시 진행자 화면에 온라인 배지가 표시되는가
@@ -387,6 +382,26 @@
   - [ ] 대기실에서 강퇴 시 대상이 목록에서 즉시 제거되는가
   - [ ] 게임 중 강퇴 시 대상이 탈락 처리되고 승리 조건이 재검사되는가
   - [ ] 진행자가 아닌 참가자는 강퇴를 실행할 수 없는가 (권한 거부)
+
+- **Task 013-3: 참가자 대기실 자발적 퇴장 구현** ✅ - 완료 (auto-dev · F021)
+  > 대기 중(`status='waiting'`) 참가자가 **본인 세션으로 스스로 퇴장**하는 기능(F021). 게임 시작(day/night) 후 이탈은 범위 밖(진행 중 DELETE는 FK·승리 판정을 깨뜨림 — 서버가 차단). **강퇴(Task 013-1)와 DELETE+`PLAYER_LEFT` 메커니즘 공유**.
+  - ✅ `lib/game/realtime.ts` — `GAME_EVENTS.PLAYER_LEFT`(`"player_left"`) + `PlayerLeftPayload{ playerId }`(role/token 미포함)
+  - ✅ `lib/game/actions.ts`:
+    - (내부·공유) `removePlayerFromRoom(supabase, roomId, playerId)` — `game_players` DELETE + `PLAYER_LEFT` broadcast. **Task 013-1 대기실 강퇴가 재사용**
+    - (export) `leaveGame(token)` — `getSenderContext` 본인 확인(없으면 멱등 `{ok:true}`) → **`status='waiting'` 가드**(진행 중 거부) → 본인 레코드만 삭제. **본인 session_token 인증**(타인 제거 불가)
+    - `startGame` 보강 — 역할 배정 UPDATE 행수 검증: 스냅샷(getRoomPlayers) 이후 참가자가 이탈(자발적 퇴장·강퇴)해 배분표 총원과 어긋나면 day 전환을 중단("참가자 구성이 변경되었습니다. 다시 시작해주세요"). **TOCTOU 레이스로 인한 승리 판정 왜곡 방지**(재시작으로 복구)
+  - ✅ `app/game/waiting/page.tsx` — [나가기] 버튼(`variant="outline"`·confirm·pending). 성공 시 `clearSession()`→`/game`, 게임 시작됨(에러 "시작") 시 `/game/play`, 그 외 에러는 대기실에 머무르며 문구 표시. `PLAYER_LEFT` 구독으로 목록 filter 제거
+  - ✅ `app/game/admin/page.tsx` — `PLAYER_LEFT` 구독으로 `players` filter 제거 + `onlineIds` 정리(진행자 화면 실시간 반영)
+  - ✅ 재사용: `useGameSession.clearSession`, `getSenderContext`, `getPlayerBySession` null 자동복원(재접속 시 입장 폼 복귀), `broadcastToRoom`+`roomChannel`. 스키마 변경 없음
+  - ✅ **정합성/보안**: `status='waiting'`에서만 DELETE · 본인만 삭제 · 멱등 · PLAYER_LEFT 페이로드에 secret 없음. code-reviewer 지적(TOCTOU·클라 에러 미구분) 반영
+  - ⚠️ **QA 환경 제약**: 이 세션에 Playwright MCP 부재 → qa-tester가 **실제 dev 서버 Server Action raw 호출 + 실제 Realtime WebSocket 구독**으로 서버·보안 로직을 실증 검증(아래 핵심 7항목 PASS). **브라우저 화면전환·콘솔에러·startGame 레이스 재현은 미확인** → Task 014(통합 테스트)에서 Playwright로 마저 확인 권장
+
+  ### 테스트 체크리스트
+  - [x] 대기실 [나가기] 시 본인 세션이 정리되고 입장 화면으로 복귀하는가 (localStorage 토큰 제거) _(서버 로직·세션 정리 로직 확인 · 화면전환은 Playwright 부재로 미관측)_
+  - [x] 나간 참가자가 다른 참가자·진행자 목록에서 실시간으로 제거되는가 (PLAYER_LEFT) _(실제 WebSocket으로 player_left {playerId} 도달 실증)_
+  - [x] 퇴장 후 같은 닉네임으로 재입장이 가능한가 (정원·닉네임 회복)
+  - [x] 게임 시작(day) 상태에서 `leaveGame` 직접 호출 시 거부되고 DB가 변경되지 않는가 _(raw 호출 실증)_
+  - [x] 남의 session_token으로 타인을 제거할 수 없는가 (본인만 삭제) _(raw 호출 실증)_
 
 - **Task 013-2: 세션 재접속·이어하기 완성** - 우선순위
   > 이탈(화면 잠금·백그라운드·네트워크 끊김·탭 종료·새로고침) 후 복귀한 참가자가 **닉네임 재입력 없이 게임에 매끄럽게 이어붙는** 경험을 완성한다. Task 008에서 기본 라우팅 게이트(지각 입장 차단·상태 기반 이동)는 이미 확립됐고, 이 태스크는 play 화면이 실데이터가 된 뒤(Task 010~013) **내 실제 역할·현재 페이즈·채팅 이력까지 복원**하는 부분을 마무리한다. (설계 원칙: Phase 3 상단 "실시간·재접속 설계 원칙" 참조)
