@@ -366,22 +366,25 @@
   - [x] 게임 종료 화면에서 모든 역할이 공개되는가 _(진행 중 getGameResult는 null — 미공개 실증)_
   - [x] 게임 리셋 후 대기실에서 새 게임을 시작할 수 있는가 _(리셋→waiting→시작→역할 재배분)_
 
-- **Task 013-1: 참가자 접속 관리 및 강퇴 기능 구현**
-  - `lib/game/hooks/useGamePresence.ts` — Supabase Realtime Presence 구독 훅
-    - 참가자 입장 시 Presence 채널 track, 주기적 하트비트로 `game_players.last_seen_at` 갱신
-    - 참가자별 온라인/오프라인 상태 파생 (Presence leave 또는 last_seen_at 임계 초과 시 오프라인)
-  - 대기실·진행자 대시보드에 접속 상태 배지 연동 (F020)
-  - 대기실 강퇴 Server Action: 대상 `game_players` 레코드 DELETE → Realtime로 전원 목록 갱신
-  - 게임 중 강퇴 Server Action: 대상 `is_alive=false` 처리 + 시스템 메시지 발송 + 승리 조건 체크 실행 (수동 탈락 처리와 동일 메커니즘, 사유만 구분)
-  - 진행자 권한 검증 (PIN 보유자만 강퇴 가능)
-  - **대기실 강퇴는 Task 013-3의 `removePlayerFromRoom` 헬퍼 + `PLAYER_LEFT` 이벤트를 그대로 재사용**(중복 구현 금지 — 진행자 PIN 게이트만 추가)
+- **Task 013-1: 참가자 접속 관리 및 강퇴 기능 구현** ✅ - 완료 (auto-dev · F019/F020 · 브랜치 auto/game-presence-kick)
+  - ✅ `lib/game/hooks/useGamePresence.ts` — Supabase Realtime Presence 구독 훅
+    - ✅ 참가자가 자기 화면(대기실·게임)에서 본인을 Presence에 track(key=playerId, 페이로드는 playerId만 — role/token 미포함). 진행자는 참가자 레코드가 없어 track 없이 읽기만 함
+    - ✅ 참가자별 온라인/오프라인 상태 파생 (Presence sync/leave 기반). **접속은 "연결이 살아있는가"라는 실시간 신호이므로 DB 폴링(last_seen_at 하트비트)보다 Realtime Presence를 단일 소스로 채택** — 끊김 즉시 leave, 무(無) DB write. `game_players.last_seen_at` 컬럼은 미사용(향후 서버측 폴백 필요 시 활용)
+  - ✅ 대기실(PlayerCard `isOnline`)·진행자 대시보드(접속 컬럼)에 접속 상태 배지 연동 (F020). play 화면도 track만 수행해 게임 중에도 진행자 화면에 온라인 반영
+  - ✅ 강퇴 Server Action `kickPlayer(roomId, pin, targetId)` — PIN 게이트 + 대상 UUID/방 일치 검증 + 방 상태 분기:
+    - 대기실(waiting): **Task 013-3의 `removePlayerFromRoom` 재사용**(game_players DELETE + `PLAYER_LEFT` broadcast → 전원 목록 실시간 제거). 본인이 강퇴되면 대기실 화면이 self-check로 세션 정리 후 입장 화면으로
+    - 진행 중(day/night): `resolveElimination(reason='kick')`로 `is_alive=false` + 시스템 메시지("○○님이 진행자에 의해 퇴장되었습니다") + `PLAYER_ELIMINATED` broadcast + 승리 조건 재검사 (수동 탈락과 동일 메커니즘, 사유만 구분 — 진행 중 DELETE는 FK·승리판정 붕괴라 금지)
+    - 종료(ended): 거부
+  - ✅ 진행자 권한 검증 — `verifyAdminPin(pin, roomId)` 통과자만 강퇴(참가자는 남을 강퇴 불가). admin 더미 `handleKick` 제거 → 실연결(확인 문구 상태별 구분·탈락자 버튼 비활성)
+  - ✅ 멱등: 이미 없는/탈락한 대상 강퇴는 `resolveElimination` is_alive 가드로 중복 부작용 없음. 방어적으로 `resolveElimination` UPDATE에 `room_id` 필터 추가
+  - ⚠️ **QA 환경 제약**: 이 세션 Playwright MCP 부재 → qa-tester가 dev 서버 Server Action raw 호출 + 실제 Realtime WebSocket 구독으로 **서버/보안 로직 5항목 PASS**(대기실 DELETE+PLAYER_LEFT / 잘못된 PIN 거부 / 진행 중 is_alive+시스템메시지+PLAYER_ELIMINATED / 멱등 / 대상 검증). **Presence 배지 UI(온라인/오프라인 실시간 표시)는 브라우저 필요 → Task 014로 이관 검증**
 
   ### 테스트 체크리스트
-  - [ ] 참가자 접속 시 진행자 화면에 온라인 배지가 표시되는가
-  - [ ] 참가자 연결 종료(탭 닫기) 시 오프라인 배지로 전환되는가
-  - [ ] 대기실에서 강퇴 시 대상이 목록에서 즉시 제거되는가
-  - [ ] 게임 중 강퇴 시 대상이 탈락 처리되고 승리 조건이 재검사되는가
-  - [ ] 진행자가 아닌 참가자는 강퇴를 실행할 수 없는가 (권한 거부)
+  - [~] 참가자 접속 시 진행자 화면에 온라인 배지가 표시되는가 _(Presence 훅 구현 · 브라우저 검증은 Task 014 이관)_
+  - [~] 참가자 연결 종료(탭 닫기) 시 오프라인 배지로 전환되는가 _(Presence leave 기반 · 브라우저 검증은 Task 014 이관)_
+  - [x] 대기실에서 강퇴 시 대상이 목록에서 즉시 제거되는가 _(DELETE + player_left 프레임 실측)_
+  - [x] 게임 중 강퇴 시 대상이 탈락 처리되고 승리 조건이 재검사되는가 _(is_alive=false + 시스템 메시지 + player_eliminated + winner 재판정 실측)_
+  - [x] 진행자가 아닌 참가자는 강퇴를 실행할 수 없는가 (권한 거부) _(잘못된 PIN {ok:false} + DB 미변경 실측)_
 
 - **Task 013-3: 참가자 대기실 자발적 퇴장 구현** ✅ - 완료 (auto-dev · F021)
   > 대기 중(`status='waiting'`) 참가자가 **본인 세션으로 스스로 퇴장**하는 기능(F021). 게임 시작(day/night) 후 이탈은 범위 밖(진행 중 DELETE는 FK·승리 판정을 깨뜨림 — 서버가 차단). **강퇴(Task 013-1)와 DELETE+`PLAYER_LEFT` 메커니즘 공유**.

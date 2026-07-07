@@ -34,6 +34,7 @@ import {
   closeVoting,
   getNightActionStatus,
   getRoomPlayers,
+  kickPlayer,
   manualEliminate,
   resetGame,
   resolveNight,
@@ -44,6 +45,7 @@ import {
   type RoomPlayer,
 } from "@/lib/game/actions";
 import { useGamePhase } from "@/lib/game/hooks/useGamePhase";
+import { useGamePresence } from "@/lib/game/hooks/useGamePresence";
 import { ROLE_LABELS, MIN_PLAYERS, WINNER_LABELS } from "@/lib/game/constants";
 import {
   GAME_EVENTS,
@@ -88,8 +90,12 @@ export default function GameAdminPage() {
   const [startError, setStartError] = useState<string | null>(null);
   const [isStarting, setIsStarting] = useState(false);
 
-  const [onlineIds, setOnlineIds] = useState<Set<string>>(new Set());
   const [systemMessage, setSystemMessage] = useState("");
+
+  // 강퇴(Task 013-1) — 진행 중 상태 표시 및 오류 안내. 실제 목록/생존 반영은
+  // kickPlayer가 유발하는 PLAYER_LEFT(대기실)/PLAYER_ELIMINATED(진행 중) broadcast로 처리한다.
+  const [isKicking, setIsKicking] = useState<string | null>(null);
+  const [kickError, setKickError] = useState<string | null>(null);
 
   // 페이즈 전환 제어 — 게임 시작(Task 013)
   const [isTransitioning, setIsTransitioning] = useState(false);
@@ -138,6 +144,10 @@ export default function GameAdminPage() {
       setEliminateError(null);
     },
   });
+
+  // 접속 상태(F020) — 참가자들이 자기 화면(대기실/게임)에서 track한 Realtime Presence를
+  // 진행자는 읽기만 한다(진행자는 참가자 레코드가 없으므로 selfPlayerId 미전달로 track하지 않음).
+  const onlineIds = useGamePresence(adminCtx?.roomId ?? null);
 
   // 밤 결과 처리는 phase당 한 번만 허용하는 클라 가드다 — 새 밤이 시작(PHASE_CHANGED로
   // status가 night으로 바뀜)되면 다음 밤을 다시 처리할 수 있도록 초기화한다.
@@ -189,11 +199,6 @@ export default function GameAdminPage() {
           mapped.forEach((p) => byId.set(p.id, p));
           return Array.from(byId.values());
         });
-        setOnlineIds((prev) => {
-          const next = new Set(prev);
-          mapped.forEach((p) => next.add(p.id));
-          return next;
-        });
       })
       .catch(() => {
         if (!cancelled) setStartError("참가자 목록을 불러오지 못했습니다");
@@ -233,17 +238,12 @@ export default function GameAdminPage() {
           if (prev.some((p) => p.id === joined.id)) return prev;
           return [...prev, toGamePlayer(joined, adminCtx.roomId)];
         });
-        setOnlineIds((prev) => new Set(prev).add(joined.id));
       })
       .on("broadcast", { event: GAME_EVENTS.PLAYER_LEFT }, ({ payload }) => {
-        // 참가자가 대기실에서 나가면(자발적 퇴장/강퇴) 목록·접속 상태에서 제거한다.
+        // 참가자가 대기실에서 나가면(자발적 퇴장/강퇴) 목록에서 제거한다.
+        // 접속 상태는 Realtime Presence(useGamePresence)가 자동 반영하므로 여기서 다루지 않는다.
         const { playerId } = payload as PlayerLeftPayload;
         setPlayers((prev) => prev.filter((p) => p.id !== playerId));
-        setOnlineIds((prev) => {
-          const next = new Set(prev);
-          next.delete(playerId);
-          return next;
-        });
       })
       .on("broadcast", { event: GAME_EVENTS.VOTE_UPDATE }, ({ payload }) => {
         const update = payload as VoteUpdatePayload;
@@ -390,19 +390,36 @@ export default function GameAdminPage() {
     [adminCtx],
   );
 
-  // 강퇴 — 탈락 처리 + 접속 상태 오프라인 처리 (데모, Task 013-1 소관)
-  function handleKick(playerId: string) {
-    setPlayers((prev) =>
-      prev.map((player) =>
-        player.id === playerId ? { ...player, isAlive: false } : player,
-      ),
-    );
-    setOnlineIds((prev) => {
-      const next = new Set(prev);
-      next.delete(playerId);
-      return next;
-    });
-  }
+  /**
+   * 강퇴(Task 013-1) — 진행자 PIN 게이트. 대기실이면 대상이 목록에서 제거(DELETE),
+   * 진행 중이면 탈락 처리된다(서버가 상태로 분기). 결과는 kickPlayer가 유발하는
+   * PLAYER_LEFT/PLAYER_ELIMINATED broadcast로 화면에 반영되므로 로컬 상태를 직접 건드리지 않는다.
+   */
+  const handleKick = useCallback(
+    async (playerId: string, nickname: string) => {
+      if (!adminCtx) return;
+      // 진행 중 강퇴는 탈락 처리(스펙테이터 전환), 대기실 강퇴는 목록에서 제거 — 결과가
+      // 다르므로 진행자에게 어느 쪽인지 확인 문구로 명확히 구분한다.
+      const inGame = status === "day" || status === "night";
+      const confirmMsg = inGame
+        ? `${nickname}님을 강퇴(탈락 처리)하시겠습니까?`
+        : `${nickname}님을 대기실에서 강퇴하시겠습니까?`;
+      if (!window.confirm(confirmMsg)) return;
+      setKickError(null);
+      setIsKicking(playerId);
+      try {
+        const result = await kickPlayer(adminCtx.roomId, adminCtx.pin, playerId);
+        if (!result.ok) {
+          setKickError(result.error);
+        }
+      } catch {
+        setKickError("강퇴에 실패했습니다. 다시 시도해주세요.");
+      } finally {
+        setIsKicking(null);
+      }
+    },
+    [adminCtx, status],
+  );
 
   /** 페이즈 전환을 예약한다 — 현재 상태의 반대로 10초 카운트다운을 시작한다. */
   const handleRequestTransition = useCallback(async () => {
@@ -575,7 +592,14 @@ export default function GameAdminPage() {
                           type="button"
                           size="sm"
                           variant="destructive"
-                          onClick={() => handleKick(player.id)}
+                          disabled={
+                            isKicking === player.id ||
+                            status === "ended" ||
+                            // 진행 중 이미 탈락한 대상은 강퇴가 no-op이므로 비활성화한다.
+                            // (대기실에서는 전원 is_alive=true라 항상 활성)
+                            !player.isAlive
+                          }
+                          onClick={() => void handleKick(player.id, player.nickname)}
                         >
                           강퇴
                         </Button>
@@ -587,6 +611,7 @@ export default function GameAdminPage() {
             </table>
           </div>
           {eliminateError && <p className="text-destructive text-sm">{eliminateError}</p>}
+          {kickError && <p className="text-destructive text-sm">{kickError}</p>}
 
           {/* 게임 시작 제어 — 최소 인원 미달 시 버튼을 노출하지 않는다 */}
           <div className="flex flex-col gap-2 rounded-lg border p-4">

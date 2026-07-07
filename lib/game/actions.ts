@@ -860,7 +860,7 @@ async function resolveElimination(
   supabase: AdminClient,
   roomId: string,
   targetId: string,
-  reason: "vote" | "night" | "manual",
+  reason: "vote" | "night" | "manual" | "kick",
 ): Promise<Winner | null> {
   // is_alive=true 조건을 걸어 멱등성을 확보한다 — 이미 탈락한 대상(중복 마감·버튼 재클릭·
   // 관리자 탭 중복)이면 갱신 행이 0건이 되어, 시스템 메시지·PLAYER_ELIMINATED broadcast를
@@ -869,6 +869,7 @@ async function resolveElimination(
     .from("game_players")
     .update({ is_alive: false })
     .eq("id", targetId)
+    .eq("room_id", roomId)
     .eq("is_alive", true)
     .select("id, nickname")
     .maybeSingle();
@@ -883,13 +884,16 @@ async function resolveElimination(
   }
 
   // 탈락 사유별 시스템 메시지 문구 분기 — vote(낮 투표 마감)·night(밤 처리 결과)·
-  // manual(진행자 수동 탈락)은 참가자에게 서로 다른 맥락을 전달해야 하므로 문구를 구분한다.
+  // manual(진행자 수동 탈락)·kick(진행자 강퇴)은 참가자에게 서로 다른 맥락을 전달해야 하므로
+  // 문구를 구분한다.
   const content =
     reason === "vote"
       ? `${target.nickname}님이 공동체를 떠났습니다`
       : reason === "night"
         ? `밤 사이 ${target.nickname}님이 이단 세력에 의해 제거되었습니다`
-        : `${target.nickname}님이 탈락 처리되었습니다`;
+        : reason === "kick"
+          ? `${target.nickname}님이 진행자에 의해 퇴장되었습니다`
+          : `${target.nickname}님이 탈락 처리되었습니다`;
 
   const { data: message, error: messageError } = await supabase
     .from("game_messages")
@@ -1856,6 +1860,84 @@ export async function manualEliminate(
     const winner = await resolveElimination(supabase, roomId, targetId, "manual");
 
     return { ok: true, winner };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
+  }
+}
+
+type KickPlayerResult =
+  | { ok: true; winner?: Winner | null }
+  | { ok: false; error: string };
+
+/**
+ * 진행자가 참가자를 강퇴한다(F019 · PIN 게이트) — 방 상태에 따라 처리 경로가 갈린다.
+ * - 대기실(status='waiting'): game_players 레코드 DELETE. 자발적 퇴장(leaveGame)과 동일하게
+ *   removePlayerFromRoom을 재사용해 PLAYER_LEFT로 전원 목록에서 실시간 제거한다.
+ * - 진행 중(status='day'|'night'): DELETE는 역할/투표/밤 행동 FK와 승리 판정을 깨뜨리므로
+ *   대신 탈락 처리(is_alive=false)한다 — 수동 탈락과 동일 메커니즘(resolveElimination)이되
+ *   사유만 'kick'으로 구분하고, 시스템 메시지·PLAYER_ELIMINATED broadcast·승리 조건 재검사를 수행한다.
+ * - 종료(status='ended'): 강퇴 대상이 없으므로 거부한다.
+ *
+ * 자발적 퇴장(leaveGame)과 달리 본인 제약이 없다(진행자가 임의 참가자를 대상으로 지정) —
+ * 그 권한은 verifyAdminPin(pin, roomId)로만 부여된다(참가자는 남을 강퇴할 수 없다).
+ */
+export async function kickPlayer(
+  roomId: string,
+  pin: string,
+  targetId: string,
+): Promise<KickPlayerResult> {
+  const verifyResult = await verifyAdminPin(pin, roomId);
+  if (!verifyResult.ok) {
+    return verifyResult;
+  }
+  if (verifyResult.roomId !== roomId) {
+    return { ok: false, error: "PIN이 올바르지 않습니다" };
+  }
+
+  try {
+    const supabase = createAdminClient();
+
+    if (!UUID_RE.test(targetId)) {
+      return { ok: false, error: "대상을 확인해주세요" };
+    }
+
+    const { data: room, error: roomError } = await supabase
+      .from("game_rooms")
+      .select("status")
+      .eq("id", roomId)
+      .maybeSingle();
+
+    if (roomError || !room) {
+      return { ok: false, error: "게임 방을 찾을 수 없습니다" };
+    }
+
+    // 대상이 같은 방의 참가자인지 확인한다(다른 방/유효하지 않은 대상 차단).
+    const { data: target, error: targetError } = await supabase
+      .from("game_players")
+      .select("id, room_id")
+      .eq("id", targetId)
+      .maybeSingle();
+
+    if (targetError || !target || target.room_id !== roomId) {
+      return { ok: false, error: "대상을 확인해주세요" };
+    }
+
+    if (room.status === "waiting") {
+      // 대기실 강퇴 — 자발적 퇴장과 동일 경로(DELETE + PLAYER_LEFT)
+      await removePlayerFromRoom(supabase, roomId, targetId);
+      return { ok: true };
+    }
+
+    if (room.status === "day" || room.status === "night") {
+      // 진행 중 강퇴 — 탈락 처리 + 승리 조건 재검사(DELETE 금지)
+      const winner = await resolveElimination(supabase, roomId, targetId, "kick");
+      return { ok: true, winner };
+    }
+
+    return { ok: false, error: "종료된 게임에서는 강퇴할 수 없습니다" };
   } catch (error) {
     return {
       ok: false,

@@ -42,6 +42,7 @@ import {
 import { useGameChat } from "@/lib/game/hooks/useGameChat";
 import { useGameNight } from "@/lib/game/hooks/useGameNight";
 import { useGamePhase } from "@/lib/game/hooks/useGamePhase";
+import { useGamePresence } from "@/lib/game/hooks/useGamePresence";
 import { useGameSession } from "@/lib/game/hooks/useGameSession";
 import { useGameVotes } from "@/lib/game/hooks/useGameVotes";
 import {
@@ -94,6 +95,10 @@ function toGameMessage(payload: ChatMessagePayload, roomId: string): GameMessage
 export default function GamePlayPage() {
   const router = useRouter();
   const { player, loading, sessionToken } = useGameSession();
+
+  // 접속 상태(F020) — 게임 중에도 본인을 Presence에 track해 진행자 화면에 온라인으로 보이게 한다.
+  // 이 화면은 다른 참가자의 배지를 렌더하지 않으므로 반환값은 사용하지 않는다(track 목적).
+  useGamePresence(player?.roomId ?? null, player?.id ?? null);
 
   // 본인 role — 밤 행동 가능 여부·비밀 채널 소속 계산에만 쓰인다. 남의 role은 절대 조회하지 않는다.
   const [role, setRole] = useState<PlayerRole | null>(null);

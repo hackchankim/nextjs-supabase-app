@@ -10,6 +10,13 @@ import type { ChatChannel, Winner } from "@/lib/game/types";
 export const roomChannel = (roomId: string) => `room:${roomId}`;
 
 /**
+ * 방별 Presence 채널명 — 참가자의 온라인/오프라인 접속 상태(F020) 전용.
+ * Broadcast 채널과 분리해 접속 상태 관심사를 격리한다. Presence 페이로드에는
+ * playerId(이미 공개 정보)만 담고 role/session_token 등 비밀은 절대 싣지 않는다.
+ */
+export const presenceChannel = (roomId: string) => `presence:${roomId}`;
+
+/**
  * 참가자별 개인 인박스 Broadcast 채널명 — 비밀 채널(이단/당회)·1:1 귓속말 배달용.
  * inboxToken은 서버(lib/game/inbox.ts의 computeInboxToken)가 계산한 HMAC 값으로,
  * 시크릿 없이는 역산이 불가능하므로 채널명 자체가 노출되어도 다른 참가자가 추측해

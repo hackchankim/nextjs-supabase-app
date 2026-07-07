@@ -18,6 +18,7 @@ import {
   type PlayerJoinedPayload,
   type PlayerLeftPayload,
 } from "@/lib/game/realtime";
+import { useGamePresence } from "@/lib/game/hooks/useGamePresence";
 import { useGameSession } from "@/lib/game/hooks/useGameSession";
 import { createClient } from "@/lib/supabase/client";
 import type { GamePlayer } from "@/lib/game/types";
@@ -44,6 +45,10 @@ export default function GameWaitingPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [leaveError, setLeaveError] = useState<string | null>(null);
   const [isLeaving, startLeaving] = useTransition();
+
+  // 접속 상태(F020) — 본인을 Presence에 track하고(진행자 화면에 온라인으로 보이도록)
+  // 동시에 다른 참가자의 온라인 여부를 읽어 카드에 배지로 표시한다.
+  const onlineIds = useGamePresence(player?.roomId ?? null, player?.id ?? null);
 
   // 대기실에서 스스로 나가기(F021) — 본인 세션으로 leaveGame 호출 후 세션을 정리하고 입장 화면으로.
   const handleLeave = useCallback(() => {
@@ -123,6 +128,15 @@ export default function GameWaitingPage() {
       })
       .on("broadcast", { event: GAME_EVENTS.PLAYER_LEFT }, ({ payload }) => {
         const { playerId } = payload as PlayerLeftPayload;
+        // 본인이 진행자에 의해 강퇴된 경우 — 남은 session_token은 이미 삭제된 레코드를
+        // 가리키므로 즉시 세션을 정리하고 입장 화면으로 돌려보낸다(play 화면의 자기 탈락
+        // 처리와 동일한 self-check). 그렇지 않으면 강퇴 후에도 화면에 머무르게 된다.
+        if (playerId === player.id) {
+          window.alert("진행자에 의해 대기실에서 내보내졌습니다.");
+          clearSession();
+          router.replace("/game");
+          return;
+        }
         setPlayers((prev) => prev.filter((p) => p.id !== playerId));
       })
       .subscribe();
@@ -130,7 +144,7 @@ export default function GameWaitingPage() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [player, handleGameStarted]);
+  }, [player, handleGameStarted, clearSession, router]);
 
   if (loading || !player) {
     return null;
@@ -155,6 +169,7 @@ export default function GameWaitingPage() {
             key={roomPlayer.id}
             player={toGamePlayer(roomPlayer, player.roomId)}
             showAliveStatus={false}
+            isOnline={onlineIds.has(roomPlayer.id)}
           />
         ))}
       </div>
