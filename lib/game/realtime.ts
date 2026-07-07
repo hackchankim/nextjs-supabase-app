@@ -42,6 +42,8 @@ export const GAME_EVENTS = {
   PHASE_CHANGED: "phase_changed",
   /** 진행자가 게임을 초기화(리셋)했을 때 */
   GAME_RESET: "game_reset",
+  /** 참가자가 대기실에서 나갔을 때 (자발적 퇴장 또는 진행자 강퇴 — game_players 레코드 삭제) */
+  PLAYER_LEFT: "player_left",
 } as const;
 
 /** PLAYER_JOINED 이벤트 페이로드 — role/session_token 제외 */
@@ -49,6 +51,11 @@ export interface PlayerJoinedPayload {
   id: string;
   nickname: string;
   isAlive: boolean;
+}
+
+/** PLAYER_LEFT 이벤트 페이로드 — 목록에서 제거할 대상 id만(role/session_token 미포함) */
+export interface PlayerLeftPayload {
+  playerId: string;
 }
 
 /** GAME_STARTED 이벤트 페이로드 — 개인별 역할은 포함하지 않는다(무차별 UI 원칙) */

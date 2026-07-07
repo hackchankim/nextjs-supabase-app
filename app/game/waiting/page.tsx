@@ -5,13 +5,19 @@
 // 실시간 참가자 목록은 서버가 정제된 페이로드만 Broadcast로 송출하는 채널(room:{roomId})을
 // 구독해 받는다. Postgres Changes는 사용하지 않는다(anon에게 role/session_token까지
 // 전체 행이 노출되는 것이 실측으로 확인됨).
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 
+import { Button } from "@/components/ui/button";
 import { PlayerCard } from "@/components/game/PlayerCard";
-import { getRoomPlayers, type RoomPlayer } from "@/lib/game/actions";
+import { getRoomPlayers, leaveGame, type RoomPlayer } from "@/lib/game/actions";
 import { MIN_PLAYERS } from "@/lib/game/constants";
-import { GAME_EVENTS, roomChannel, type PlayerJoinedPayload } from "@/lib/game/realtime";
+import {
+  GAME_EVENTS,
+  roomChannel,
+  type PlayerJoinedPayload,
+  type PlayerLeftPayload,
+} from "@/lib/game/realtime";
 import { useGameSession } from "@/lib/game/hooks/useGameSession";
 import { createClient } from "@/lib/supabase/client";
 import type { GamePlayer } from "@/lib/game/types";
@@ -33,9 +39,31 @@ function toGamePlayer(player: RoomPlayer, roomId: string): GamePlayer {
 
 export default function GameWaitingPage() {
   const router = useRouter();
-  const { player, loading } = useGameSession();
+  const { player, loading, sessionToken, clearSession } = useGameSession();
   const [players, setPlayers] = useState<RoomPlayer[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [leaveError, setLeaveError] = useState<string | null>(null);
+  const [isLeaving, startLeaving] = useTransition();
+
+  // 대기실에서 스스로 나가기(F021) — 본인 세션으로 leaveGame 호출 후 세션을 정리하고 입장 화면으로.
+  const handleLeave = useCallback(() => {
+    if (!sessionToken) return;
+    if (!window.confirm("대기실에서 나가시겠습니까?")) return;
+    setLeaveError(null);
+    startLeaving(async () => {
+      const result = await leaveGame(sessionToken);
+      if (result.ok) {
+        clearSession();
+        router.replace("/game");
+      } else if (result.error.includes("시작")) {
+        // 나가려는 사이 게임이 시작된 경우 — 게임 화면으로 이어붙인다.
+        router.replace("/game/play");
+      } else {
+        // 그 외 일시적 오류는 대기실에 머무르며 사유를 안내한다.
+        setLeaveError(result.error);
+      }
+    });
+  }, [sessionToken, clearSession, router]);
 
   // 세션/상태 기반 라우팅:
   // - 세션이 없으면 입장 화면으로
@@ -93,6 +121,10 @@ export default function GameWaitingPage() {
       .on("broadcast", { event: GAME_EVENTS.GAME_STARTED }, () => {
         handleGameStarted();
       })
+      .on("broadcast", { event: GAME_EVENTS.PLAYER_LEFT }, ({ payload }) => {
+        const { playerId } = payload as PlayerLeftPayload;
+        setPlayers((prev) => prev.filter((p) => p.id !== playerId));
+      })
       .subscribe();
 
     return () => {
@@ -130,6 +162,18 @@ export default function GameWaitingPage() {
       <p className="text-center text-sm text-muted-foreground">
         참가자를 기다리는 중입니다...
       </p>
+
+      <div className="flex flex-col items-center gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          onClick={handleLeave}
+          disabled={isLeaving}
+        >
+          나가기
+        </Button>
+        {leaveError && <p className="text-sm text-destructive">{leaveError}</p>}
+      </div>
     </section>
   );
 }

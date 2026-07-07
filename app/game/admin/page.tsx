@@ -50,6 +50,7 @@ import {
   roomChannel,
   type PlayerEliminatedPayload,
   type PlayerJoinedPayload,
+  type PlayerLeftPayload,
   type VoteUpdatePayload,
 } from "@/lib/game/realtime";
 import type { GamePlayer } from "@/lib/game/types";
@@ -233,6 +234,16 @@ export default function GameAdminPage() {
           return [...prev, toGamePlayer(joined, adminCtx.roomId)];
         });
         setOnlineIds((prev) => new Set(prev).add(joined.id));
+      })
+      .on("broadcast", { event: GAME_EVENTS.PLAYER_LEFT }, ({ payload }) => {
+        // 참가자가 대기실에서 나가면(자발적 퇴장/강퇴) 목록·접속 상태에서 제거한다.
+        const { playerId } = payload as PlayerLeftPayload;
+        setPlayers((prev) => prev.filter((p) => p.id !== playerId));
+        setOnlineIds((prev) => {
+          const next = new Set(prev);
+          next.delete(playerId);
+          return next;
+        });
       })
       .on("broadcast", { event: GAME_EVENTS.VOTE_UPDATE }, ({ payload }) => {
         const update = payload as VoteUpdatePayload;

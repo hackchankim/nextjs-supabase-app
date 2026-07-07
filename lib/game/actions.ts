@@ -11,6 +11,7 @@ import {
   type NightActionUpdatePayload,
   type PhaseChangedPayload,
   type PhaseTransitionScheduledPayload,
+  type PlayerLeftPayload,
   type VoteUpdatePayload,
 } from "@/lib/game/realtime";
 import {
@@ -373,12 +374,21 @@ export async function startGame(roomId: string, pin: string): Promise<StartGameR
       supabase
         .from("game_players")
         .update({ role: roles[index] })
-        .eq("id", player.id),
+        .eq("id", player.id)
+        .select("id"),
     );
     const updateResults = await Promise.all(updates);
     const updateError = updateResults.find((result) => result.error)?.error;
     if (updateError) {
       throw new Error(`역할 배분 실패: ${updateError.message}`);
+    }
+
+    // 스냅샷(getRoomPlayers) 이후 참가자가 나가면(자발적 퇴장·강퇴) 해당 역할 UPDATE가 0행이 되어
+    // 배분표 총원과 실제 참가자 수가 어긋난다 → 승리 판정이 왜곡되므로 day 전환을 하지 않고 중단한다.
+    // (진행자가 다시 [게임 시작]을 누르면 현재 인원으로 재배분되어 정상 복구된다.)
+    const rosterChanged = updateResults.some((result) => (result.data?.length ?? 0) === 0);
+    if (rosterChanged) {
+      return { ok: false, error: "참가자 구성이 변경되었습니다. 다시 시작해주세요" };
     }
 
     const { error: roomUpdateError } = await supabase
@@ -444,6 +454,75 @@ async function getSenderContext(
     role: player.role as PlayerRole | null,
     isAlive: player.is_alive,
   };
+}
+
+/**
+ * 참가자를 방에서 제거한다(대기실 전용) — game_players 레코드를 DELETE하고
+ * PLAYER_LEFT를 broadcast해 전원 목록에서 실시간으로 제거되게 한다.
+ * export하지 않는다 — 항상 검증된 진입점(leaveGame 등)을 통해서만 호출한다.
+ * Task 013-1의 진행자 대기실 강퇴가 이 헬퍼를 PIN 게이트로 그대로 재사용한다.
+ */
+async function removePlayerFromRoom(
+  supabase: AdminClient,
+  roomId: string,
+  playerId: string,
+): Promise<void> {
+  const { error } = await supabase
+    .from("game_players")
+    .delete()
+    .eq("id", playerId)
+    .eq("room_id", roomId);
+
+  if (error) {
+    throw new Error(`참가자 제거 실패: ${error.message}`);
+  }
+
+  const payload: PlayerLeftPayload = { playerId };
+  await broadcastToRoom(roomId, GAME_EVENTS.PLAYER_LEFT, payload);
+}
+
+type LeaveGameResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * 참가자가 대기실에서 스스로 나간다(F021) — 본인 session_token으로 인증하며
+ * 자기 자신만 삭제할 수 있다(타인 제거 불가). 대기 중(status='waiting')에만 허용한다:
+ * 진행 중(day/night)에 참가자를 DELETE하면 역할 배분·투표·밤 행동의 FK와 승리 판정이
+ * 깨지므로 서버가 최종 방어선으로 차단한다(진행 중 이탈은 관전/탈락 처리 영역).
+ */
+export async function leaveGame(token: string): Promise<LeaveGameResult> {
+  try {
+    const supabase = createAdminClient();
+    const sender = await getSenderContext(supabase, token);
+
+    // 이미 나갔거나 세션이 무효하면 멱등하게 성공 처리한다(클라이언트는 정리를 계속 진행).
+    if (!sender) {
+      return { ok: true };
+    }
+
+    const { data: room, error: roomError } = await supabase
+      .from("game_rooms")
+      .select("status")
+      .eq("id", sender.roomId)
+      .maybeSingle();
+
+    if (roomError || !room) {
+      return { ok: false, error: "게임 방을 찾을 수 없습니다" };
+    }
+
+    if (room.status !== "waiting") {
+      return { ok: false, error: "게임이 시작되어 나갈 수 없습니다" };
+    }
+
+    // 본인 id만 삭제 — session_token으로 확보한 자기 자신만 제거 가능하다.
+    await removePlayerFromRoom(supabase, sender.roomId, sender.id);
+
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
+  }
 }
 
 /**
