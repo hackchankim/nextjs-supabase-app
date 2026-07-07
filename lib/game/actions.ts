@@ -284,6 +284,56 @@ export async function getPlayerBySession(token: string): Promise<SessionPlayer |
   }
 }
 
+/**
+ * 재접속 스냅샷(Task 013-2) — 이탈(새로고침·백그라운드·네트워크 끊김) 후 복귀한 참가자가
+ * 닉네임 재입력 없이 현재 게임에 이어붙기 위해 필요한 값을 한 번에 반환한다.
+ * getSenderContext(본인 session_token으로 본인 1건만 조회)를 재사용하므로 role은 본인 것만
+ * 반환되고 남의 역할은 어떤 경로로도 노출되지 않는다. status/phaseNumber는 공개 정보다.
+ */
+export interface ResumeState {
+  /**
+   * 현재 방 status/phase — 재접속 스냅샷 계약의 일부다. play 화면은 실시간 status를
+   * useGamePhase로 따로 관리하므로 직접 쓰지 않지만, 이 훅을 공용 재접속 게이트로
+   * 쓰는 소비자(status 불일치 시 알맞은 화면으로 라우팅)를 위해 함께 반환한다.
+   * 단일 행 조회에 컬럼 2개를 더 얹는 것뿐이라 추가 비용은 사실상 없다.
+   */
+  status: GameStatus;
+  phaseNumber: number;
+  /** 본인 생존 여부 — 탈락자 재접속 시 관전 모드 판단에 쓴다 */
+  isAlive: boolean;
+  /** 본인 role만 — 재접속 시 역할 카드·비밀 채널 소속 복원용 */
+  role: PlayerRole | null;
+}
+
+export async function getResumeState(token: string): Promise<ResumeState | null> {
+  try {
+    const supabase = createAdminClient();
+    const sender = await getSenderContext(supabase, token);
+    if (!sender) {
+      return null;
+    }
+
+    const { data: room } = await supabase
+      .from("game_rooms")
+      .select("status, phase_number")
+      .eq("id", sender.roomId)
+      .maybeSingle();
+
+    if (!room) {
+      return null;
+    }
+
+    return {
+      status: room.status as GameStatus,
+      phaseNumber: room.phase_number,
+      isAlive: sender.isAlive,
+      role: sender.role,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export interface RoomPlayer {
   id: string;
   nickname: string;
@@ -523,16 +573,6 @@ export async function leaveGame(token: string): Promise<LeaveGameResult> {
       error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
     };
   }
-}
-
-/**
- * 세션 토큰으로 본인 role만 조회한다. 남의 역할은 이 함수로 절대 조회할 수 없다
- * (game_players.session_token으로 본인 1건만 조회하는 구조 자체가 격리를 강제한다).
- */
-export async function getMyRole(token: string): Promise<{ role: PlayerRole | null } | null> {
-  const supabase = createAdminClient();
-  const sender = await getSenderContext(supabase, token);
-  return sender ? { role: sender.role } : null;
 }
 
 /**

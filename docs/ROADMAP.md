@@ -406,22 +406,22 @@
   - [x] 게임 시작(day) 상태에서 `leaveGame` 직접 호출 시 거부되고 DB가 변경되지 않는가 _(raw 호출 실증)_
   - [x] 남의 session_token으로 타인을 제거할 수 없는가 (본인만 삭제) _(raw 호출 실증)_
 
-- **Task 013-2: 세션 재접속·이어하기 완성** - 우선순위
+- **Task 013-2: 세션 재접속·이어하기 완성** ✅ - 완료 (auto-dev · 브랜치 auto/game-resume)
   > 이탈(화면 잠금·백그라운드·네트워크 끊김·탭 종료·새로고침) 후 복귀한 참가자가 **닉네임 재입력 없이 게임에 매끄럽게 이어붙는** 경험을 완성한다. Task 008에서 기본 라우팅 게이트(지각 입장 차단·상태 기반 이동)는 이미 확립됐고, 이 태스크는 play 화면이 실데이터가 된 뒤(Task 010~013) **내 실제 역할·현재 페이즈·채팅 이력까지 복원**하는 부분을 마무리한다. (설계 원칙: Phase 3 상단 "실시간·재접속 설계 원칙" 참조)
-  - ~~`getMyRole(token)` Server Action~~ ✅ **Task 010에서 구현 완료** — 토큰으로 본인 1건 role만 조회(남의 역할 미노출). 재접속 시 내 역할 카드 복원에 그대로 재사용
-  - `getResumeState(token)` — 재접속 스냅샷: status·phaseNumber·isAlive·(내)role + 현재 페이즈 채팅/투표 스냅샷 훅 연동
-  - 공용 `useGameResume` 게이트 — 모든 게임 화면(`/game/*`)이 현재 status와 어긋나면 알맞은 화면으로 이동(대기/낮·밤/종료)
-  - `status='ended'` 복귀 → 게임 종료 결과 화면(전원 역할 공개, Task 006 오버레이 재사용)
-  - 탈락자 복귀 → 관전 모드(입력 비활성, 무차별 UI 유지)
-  - 저수준 소켓 재연결(백그라운드 복귀 시 Realtime 재구독)은 Task 015와 연계
-  - **선행 의존:** Task 010(채팅)·011(투표)·012(밤)·013(페이즈)이 play 화면을 실데이터화한 이후 착수해야 end-to-end 검증 가능
+  - ✅ **재접속의 실시간 델타 복원은 이미 emergent하게 동작**: 채팅/투표/밤/페이즈 이력은 각 화면의 스냅샷+구독 훅(useGameChat·useGameVotes·useGameNight·useGamePhase)이 마운트 시 서버 스냅샷을 재조회하므로 별도 작업 불필요(설계 원칙의 결실). 라우팅 게이트도 Task 008에서 확립됨. 이번 태스크는 **흩어져 있던 "내 역할·내 생존" 1회성 복원 조회를 통합**하고 **관전 모드를 명시화**하는 것이 핵심
+  - ✅ `getResumeState(token)` Server Action — 재접속 스냅샷 `{status, phaseNumber, isAlive, (내)role}`을 한 번에 반환. getSenderContext(session_token으로 본인 1건 조회) 재사용 → **role은 본인 것만**(남의 역할 미노출 구조적 보장). 기존 별도 조회 `getMyRole`을 이 함수로 통합하고 getMyRole은 제거
+  - ✅ 공용 `useGameResume(sessionToken)` 훅 — getResumeState를 감싸 마운트 시 1회 조회. play 화면이 이를 채택해 role·isAlive를 단일 소스에서 복원. status/phaseNumber도 계약에 포함해 향후 라우팅 게이트 소비자가 재사용 가능(현 play 화면은 실시간 status를 useGamePhase로 관리하므로 직접 사용 안 함). **라우팅은 Task 008의 per-page 게이트를 유지**(회귀 방지 — 기존 동작 정상)
+  - ✅ `status='ended'` 복귀 → 게임 종료 결과 화면: **기존 safety net으로 이미 동작**(useGamePhase 초기 스냅샷이 ended면 getGameResult로 전원 역할 공개 오버레이 표시). Task 006 오버레이 재사용
+  - ✅ 탈락자 복귀 → 관전 모드: resume.isAlive(이탈 중 탈락했어도 정확)로 selfAlive 판정 → 전 입력 비활성. **명시적 "관전 모드" 배너 추가**(왜 입력이 막혔는지 안내, 역할 미노출 — 무차별 UI 유지)
+  - ✅ 저수준 소켓 재연결(백그라운드 복귀 시 Realtime 재구독)은 Task 015와 연계(범위 밖 유지)
+  - ⚠️ **QA 환경 제약**: 이 세션 Playwright MCP 부재 → qa-tester가 getResumeState를 실행 검증(**4/4 PASS**: 정상 복원·**역할 격리(본인 것만)**·무효 토큰 null·탈락자 isAlive:false). **새로고침 화면 복원·관전 배너 노출·페이즈 동기화 등 브라우저 UI 재접속 시나리오는 Task 014(통합 테스트)로 이관 검증**
 
   ### 테스트 체크리스트
-  - [ ] 게임 중 새로고침/재접속 시 닉네임 재입력 없이 현재 화면(낮/밤·내 역할·페이즈)으로 복원되는가
-  - [ ] 이탈 중 페이즈가 바뀌었어도 복귀 시 최신 상태로 동기화되는가 (스냅샷 재조회)
-  - [ ] 게임 종료 후 재접속 시 결과 화면이 보이는가
-  - [ ] 탈락자가 재접속 시 관전 모드(입력 불가)로 들어가는가
-  - [ ] 재접속 시에도 내 역할 외 다른 참가자 역할이 절대 노출되지 않는가 (네트워크/소켓 프레임 포함)
+  - [~] 게임 중 새로고침/재접속 시 닉네임 재입력 없이 현재 화면(낮/밤·내 역할·페이즈)으로 복원되는가 _(세션 복원+getResumeState 역할·useGamePhase 페이즈 서버 로직 확인 · 브라우저 화면전환은 Task 014 이관)_
+  - [~] 이탈 중 페이즈가 바뀌었어도 복귀 시 최신 상태로 동기화되는가 (스냅샷 재조회) _(useGamePhase 마운트 스냅샷 · 브라우저 검증 Task 014 이관)_
+  - [~] 게임 종료 후 재접속 시 결과 화면이 보이는가 _(status='ended' safety net 로직 · 브라우저 검증 Task 014 이관)_
+  - [x] 탈락자가 재접속 시 관전 모드(입력 불가)로 들어가는가 _(getResumeState isAlive:false 실증 + 관전 배너·selfAlive 게이팅 구현)_
+  - [x] 재접속 시에도 내 역할 외 다른 참가자 역할이 절대 노출되지 않는가 _(getResumeState 역할 격리 실행 검증 — 서로 다른 토큰이 각자 role만 반환)_
 
 - **Task 014: 전체 플로우 통합 테스트**
   - Playwright MCP를 사용한 E2E 테스트 시나리오 실행

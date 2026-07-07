@@ -34,7 +34,6 @@ import { SecretChannelTab } from "@/components/game/SecretChannelTab";
 import { VoteButton } from "@/components/game/VoteButton";
 import {
   getGameResult,
-  getMyRole,
   getRoomPlayers,
   type GameResultPlayer,
   type RoomPlayer,
@@ -43,6 +42,7 @@ import { useGameChat } from "@/lib/game/hooks/useGameChat";
 import { useGameNight } from "@/lib/game/hooks/useGameNight";
 import { useGamePhase } from "@/lib/game/hooks/useGamePhase";
 import { useGamePresence } from "@/lib/game/hooks/useGamePresence";
+import { useGameResume } from "@/lib/game/hooks/useGameResume";
 import { useGameSession } from "@/lib/game/hooks/useGameSession";
 import { useGameVotes } from "@/lib/game/hooks/useGameVotes";
 import {
@@ -53,7 +53,7 @@ import {
   type PlayerEliminatedPayload,
 } from "@/lib/game/realtime";
 import { ROLE_LABELS, WINNER_LABELS } from "@/lib/game/constants";
-import type { ChatChannel, GameMessage, GamePlayer, PlayerRole, Winner } from "@/lib/game/types";
+import type { ChatChannel, GameMessage, GamePlayer, Winner } from "@/lib/game/types";
 import { canPerformNightAction, isCouncil, isHeretic } from "@/lib/game/utils";
 import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
@@ -100,8 +100,10 @@ export default function GamePlayPage() {
   // 이 화면은 다른 참가자의 배지를 렌더하지 않으므로 반환값은 사용하지 않는다(track 목적).
   useGamePresence(player?.roomId ?? null, player?.id ?? null);
 
-  // 본인 role — 밤 행동 가능 여부·비밀 채널 소속 계산에만 쓰인다. 남의 role은 절대 조회하지 않는다.
-  const [role, setRole] = useState<PlayerRole | null>(null);
+  // 재접속 스냅샷(Task 013-2) — 본인 role·생존 여부를 한 번에 복원한다. role은 밤 행동 가능
+  // 여부·비밀 채널 소속 계산에만 쓰이며, 남의 role은 어떤 경로로도 조회하지 않는다.
+  const { resume } = useGameResume(sessionToken);
+  const role = resume?.role ?? null;
   const [players, setPlayers] = useState<RoomPlayer[]>([]);
   const [nightActionTargetId, setNightActionTargetId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"public" | "secret" | "dm">("public");
@@ -133,18 +135,6 @@ export default function GamePlayPage() {
       router.replace("/game/waiting");
     }
   }, [loading, player, router]);
-
-  // 본인 role 조회 (getMyRole은 세션 토큰으로 본인 1건만 반환한다)
-  useEffect(() => {
-    if (!sessionToken) return;
-    let cancelled = false;
-    getMyRole(sessionToken).then((result) => {
-      if (!cancelled && result) setRole(result.role);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [sessionToken]);
 
   // 참가자 목록 — 생존 현황 칩·DM 대상·투표/밤 행동 대상 (role/session_token 미포함)
   useEffect(() => {
@@ -265,8 +255,9 @@ export default function GamePlayPage() {
   }
 
   const roomId = player.roomId;
-  // 본인 생존 여부 — 세션의 초기값과 실시간 탈락(PLAYER_ELIMINATED)을 함께 반영한다.
-  const selfAlive = player.isAlive && !selfEliminated;
+  // 본인 생존 여부 — 재접속 스냅샷(resume.isAlive, 이탈 중 탈락했어도 정확)을 우선하되 아직
+  // 로드 전이면 세션 초기값으로 폴백하고, 실시간 탈락(PLAYER_ELIMINATED)도 함께 반영한다.
+  const selfAlive = (resume?.isAlive ?? player.isAlive) && !selfEliminated;
 
   // 생존자 목록(자신 제외) — 낮 투표/밤 행동 공통 대상
   const aliveOthers = players
@@ -315,6 +306,18 @@ export default function GamePlayPage() {
         transitionTo={transitionTo}
         transitionAt={transitionAt}
       />
+
+      {/* 관전 모드(Task 013-2) — 탈락한 참가자가 게임 진행 중 재접속/잔류 시 명시적으로 안내한다.
+          입력은 이미 selfAlive로 비활성화되지만, 왜 비활성인지 알 수 있게 배너로 드러낸다.
+          게임 종료(winner) 시에는 결과 오버레이가 뜨므로 배너를 감춘다(무차별 UI 유지 — 역할 미노출). */}
+      {!selfAlive && !winner && (
+        <div
+          className="rounded-lg border border-dashed bg-muted/50 p-3 text-center text-sm text-muted-foreground"
+          role="status"
+        >
+          관전 모드 · 탈락하여 게임을 지켜보는 중입니다 (입력 불가)
+        </div>
+      )}
 
       {/* 생존 현황 — 개별 역할은 노출하지 않고 콤팩트 참가자 칩만 표시 */}
       <div className="flex flex-col gap-2 rounded-lg border p-3">
