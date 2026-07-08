@@ -109,7 +109,7 @@ export default function GameEntryPage() {
           )}
         </CardContent>
         <CardFooter>
-          <Button className="w-full" onClick={handleJoin} disabled={isPending}>
+          <Button className="min-h-11 w-full" onClick={handleJoin} disabled={isPending}>
             입장하기
           </Button>
         </CardFooter>
@@ -117,7 +117,9 @@ export default function GameEntryPage() {
 
       <Dialog>
         <DialogTrigger asChild>
-          <Button variant="outline">진행자로 입장</Button>
+          <Button variant="outline" className="min-h-11">
+            진행자로 입장
+          </Button>
         </DialogTrigger>
         <DialogContent>
           <DialogHeader>
@@ -137,7 +139,7 @@ export default function GameEntryPage() {
             {pinError && <p className="text-destructive text-sm">{pinError}</p>}
           </div>
           <DialogFooter>
-            <Button className="w-full" onClick={handleVerifyPin} disabled={isPending}>
+            <Button className="min-h-11 w-full" onClick={handleVerifyPin} disabled={isPending}>
               확인
             </Button>
           </DialogFooter>

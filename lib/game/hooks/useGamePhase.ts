@@ -34,6 +34,9 @@ interface UseGamePhaseOptions {
   initialStatus?: GameStatus;
   /** GAME_RESET 수신 시 호출되는 콜백 (예: 대기실로 라우팅) — 생략 가능 */
   onReset?: () => void;
+  /** (선택) 네트워크 복구 신호(useNetworkRecovery). 값이 바뀌면 status/phase 스냅샷을
+   *  재조회하고 채널을 재구독한다 — 오프라인/백그라운드 중 놓친 페이즈 전환을 복원하기 위함. */
+  recoveryKey?: number;
 }
 
 interface UseGamePhaseResult {
@@ -52,6 +55,7 @@ export function useGamePhase({
   roomId,
   initialStatus,
   onReset,
+  recoveryKey,
 }: UseGamePhaseOptions): UseGamePhaseResult {
   const [status, setStatus] = useState<GameStatus>(initialStatus ?? "waiting");
   const [phaseNumber, setPhaseNumber] = useState(0);
@@ -64,35 +68,54 @@ export function useGamePhase({
   const onResetRef = useRef(onReset);
   onResetRef.current = onReset;
 
+  // 스냅샷 재조회 중 페이즈 관련 broadcast(GAME_STARTED/PHASE_*/GAME_ENDED/GAME_RESET)가
+  // 도착했는지 추적한다(코드 리뷰 반영) — fetch가 진행되는 사이 delta가 먼저 반영된 뒤
+  // 뒤늦게 도착한 stale 스냅샷이 그 상태를 덮어쓰는 레이스를 막기 위함. 아래 스냅샷 로드
+  // effect에서 이 플래그를 보고 필요하면 한 번만 재조회한다(무한 재시도 방지).
+  const phaseSnapshotStaleRef = useRef(false);
+
   // initialStatus는 player 로드 시점(비동기)에 뒤늦게 확정될 수 있으므로(useGameSession),
   // 값이 도착하는 즉시 한 번 더 반영한다 — getRoomState 스냅샷이 도착하기 전까지의 임시값이다.
   useEffect(() => {
     if (initialStatus) setStatus(initialStatus);
   }, [initialStatus]);
 
-  // 초기 스냅샷 로드
+  // 초기 스냅샷 로드 — fetch 진행 중 페이즈 broadcast가 도착하면(phaseSnapshotStaleRef)
+  // stale 스냅샷을 그대로 적용하지 않고 1회 재조회한다(재시도는 최대 1회로 제한).
   useEffect(() => {
     if (!roomId) return;
     let cancelled = false;
+    let retried = false;
+    phaseSnapshotStaleRef.current = false;
     setLoading(true);
 
-    getRoomState(roomId)
-      .then((state) => {
-        if (cancelled || !state) return;
-        setStatus(state.status);
-        setPhaseNumber(state.phaseNumber);
-        setTransitionTo(state.transitionTo);
-        setTransitionAt(state.transitionAt);
-        setWinner(state.winner);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+    const load = () => {
+      getRoomState(roomId)
+        .then((state) => {
+          if (cancelled || !state) return;
+          if (phaseSnapshotStaleRef.current && !retried) {
+            retried = true;
+            phaseSnapshotStaleRef.current = false;
+            load();
+            return;
+          }
+          phaseSnapshotStaleRef.current = false;
+          setStatus(state.status);
+          setPhaseNumber(state.phaseNumber);
+          setTransitionTo(state.transitionTo);
+          setTransitionAt(state.transitionAt);
+          setWinner(state.winner);
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+    };
+    load();
 
     return () => {
       cancelled = true;
     };
-  }, [roomId]);
+  }, [roomId, recoveryKey]);
 
   // 공개 room 채널 구독 — 델타만 반영한다.
   useEffect(() => {
@@ -103,20 +126,24 @@ export function useGamePhase({
       .channel(roomChannel(roomId))
       .on("broadcast", { event: GAME_EVENTS.GAME_STARTED }, ({ payload }) => {
         // waiting → day(1라운드) 전환 — 진행자가 게임을 시작한 시점을 실시간으로 반영한다.
+        phaseSnapshotStaleRef.current = true;
         const update = payload as GameStartedPayload;
         setStatus(update.status);
         setPhaseNumber(update.phaseNumber);
       })
       .on("broadcast", { event: GAME_EVENTS.PHASE_TRANSITION_SCHEDULED }, ({ payload }) => {
+        phaseSnapshotStaleRef.current = true;
         const update = payload as PhaseTransitionScheduledPayload;
         setTransitionTo(update.transitionTo);
         setTransitionAt(update.transitionAt);
       })
       .on("broadcast", { event: GAME_EVENTS.PHASE_TRANSITION_CANCELLED }, () => {
+        phaseSnapshotStaleRef.current = true;
         setTransitionTo(null);
         setTransitionAt(null);
       })
       .on("broadcast", { event: GAME_EVENTS.PHASE_CHANGED }, ({ payload }) => {
+        phaseSnapshotStaleRef.current = true;
         const update = payload as PhaseChangedPayload;
         setStatus(update.status);
         setPhaseNumber(update.phaseNumber);
@@ -126,6 +153,7 @@ export function useGamePhase({
       .on("broadcast", { event: GAME_EVENTS.GAME_ENDED }, ({ payload }) => {
         // 결과(전원 역할 공개)는 각 화면이 별도로 getGameResult를 호출해 로드한다 —
         // 이 훅은 재접속 라우팅 판단에 필요한 status/winner만 최신으로 반영한다.
+        phaseSnapshotStaleRef.current = true;
         const { winner: finishedWinner } = payload as GameEndedPayload;
         setStatus("ended");
         setWinner(finishedWinner);
@@ -133,6 +161,7 @@ export function useGamePhase({
         setTransitionAt(null);
       })
       .on("broadcast", { event: GAME_EVENTS.GAME_RESET }, () => {
+        phaseSnapshotStaleRef.current = true;
         setStatus("waiting");
         setPhaseNumber(0);
         setTransitionTo(null);
@@ -145,7 +174,7 @@ export function useGamePhase({
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [roomId]);
+  }, [roomId, recoveryKey]);
 
   // transition_at 경과 시 자동으로 확정을 시도한다 — 서버가 멱등이므로 여러 클라이언트가
   // 동시에 호출해도 안전하다(첫 호출만 실제 부작용을 낸다).

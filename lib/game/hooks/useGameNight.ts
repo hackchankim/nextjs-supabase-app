@@ -21,6 +21,9 @@ import { createClient } from "@/lib/supabase/client";
 interface UseGameNightOptions {
   roomId: string;
   sessionToken: string;
+  /** (선택) 네트워크 복구 신호(useNetworkRecovery). 값이 바뀌면 채널을 재구독한다 —
+   *  오프라인/백그라운드 중 놓친 NIGHT_ACTION_UPDATE를 복원하기 위함. */
+  recoveryKey?: number;
 }
 
 interface UseGameNightResult {
@@ -35,7 +38,11 @@ interface UseGameNightResult {
  * 밤 행동을 제출하고 완료 집계를 구독하는 훅. useGameVotes와 동일한 패턴 —
  * 공개 room 채널을 구독해 델타만 반영하고 cleanup에서 반드시 removeChannel한다.
  */
-export function useGameNight({ roomId, sessionToken }: UseGameNightOptions): UseGameNightResult {
+export function useGameNight({
+  roomId,
+  sessionToken,
+  recoveryKey,
+}: UseGameNightOptions): UseGameNightResult {
   const [completedCount, setCompletedCount] = useState(0);
   const [total, setTotal] = useState(0);
 
@@ -55,7 +62,7 @@ export function useGameNight({ roomId, sessionToken }: UseGameNightOptions): Use
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [roomId]);
+  }, [roomId, recoveryKey]);
 
   const submitNightAction = useCallback(
     async (targetId: string) => {

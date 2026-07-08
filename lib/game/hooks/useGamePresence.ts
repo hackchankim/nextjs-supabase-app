@@ -17,11 +17,14 @@ import { createClient } from "@/lib/supabase/client";
  * @param roomId 대상 방 id (없으면 no-op)
  * @param selfPlayerId 본인 참가자 id. 넘기면 본인을 Presence에 track한다(참가자 화면).
  *   null/undefined면 track하지 않고 읽기만 한다(진행자 대시보드 — 진행자는 참가자 레코드가 없다).
+ * @param recoveryKey (선택) 네트워크 복구 신호(useNetworkRecovery). 값이 바뀌면 채널을
+ *   재구독해 본인 track을 다시 수행한다 — 백그라운드 복귀 후 presence leave/미갱신 방지.
  * @returns 온라인 상태인 참가자 id들의 Set (Presence key = playerId)
  */
 export function useGamePresence(
   roomId: string | null,
   selfPlayerId?: string | null,
+  recoveryKey?: number,
 ): Set<string> {
   const [onlineIds, setOnlineIds] = useState<Set<string>>(new Set());
 
@@ -54,7 +57,7 @@ export function useGamePresence(
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [roomId, selfPlayerId]);
+  }, [roomId, selfPlayerId, recoveryKey]);
 
   return onlineIds;
 }

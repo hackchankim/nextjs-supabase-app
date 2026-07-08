@@ -21,8 +21,13 @@ interface UseGameResumeResult {
 /**
  * 세션 토큰으로 재접속 스냅샷을 조회한다.
  * @param sessionToken localStorage에 저장된 본인 세션 토큰(없으면 no-op)
+ * @param recoveryKey (선택) 네트워크 복구 신호(useNetworkRecovery). 값이 바뀌면 스냅샷을
+ *   다시 조회한다 — 오프라인/백그라운드 중 놓친 본인 생존 여부 변경을 복원하기 위함.
  */
-export function useGameResume(sessionToken: string | null): UseGameResumeResult {
+export function useGameResume(
+  sessionToken: string | null,
+  recoveryKey?: number,
+): UseGameResumeResult {
   const [resume, setResume] = useState<ResumeState | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -47,7 +52,7 @@ export function useGameResume(sessionToken: string | null): UseGameResumeResult 
     return () => {
       cancelled = true;
     };
-  }, [sessionToken]);
+  }, [sessionToken, recoveryKey]);
 
   return { resume, loading };
 }

@@ -32,7 +32,7 @@ export function ActionPanel({ targets, canAct, actionLabel, onAction }: ActionPa
               key={target.id}
               type="button"
               variant="outline"
-              className="w-full justify-start"
+              className="min-h-11 w-full justify-start"
               onClick={() => onAction(target.id)}
               disabled={!canAct}
             >

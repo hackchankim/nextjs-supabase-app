@@ -4,7 +4,7 @@
 // 밤 행동 패널의 라벨/문구/외형은 역할과 무관하게 항상 동일해야 한다 (actionLabel="밤 행동" 고정).
 // 채팅은 useGameChat(Task 010)으로 실데이터에 연결한다 — 비밀 채널 탭은 역할과 무관하게
 // 전원 동일하게 렌더되며, 실제 열람/전송 자격은 서버(actions.ts)가 최종 검증한다.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { MessageSquare, Users, Vote } from "lucide-react";
 import { toast } from "sonner";
@@ -45,6 +45,7 @@ import { useGamePresence } from "@/lib/game/hooks/useGamePresence";
 import { useGameResume } from "@/lib/game/hooks/useGameResume";
 import { useGameSession } from "@/lib/game/hooks/useGameSession";
 import { useGameVotes } from "@/lib/game/hooks/useGameVotes";
+import { useNetworkRecovery } from "@/lib/game/hooks/useNetworkRecovery";
 import {
   GAME_EVENTS,
   roomChannel,
@@ -96,15 +97,24 @@ export default function GamePlayPage() {
   const router = useRouter();
   const { player, loading, sessionToken } = useGameSession();
 
+  // 오프라인/백그라운드 복귀 감지(Task 015) — recoveryKey를 아래 실데이터 훅들에 흘려보내
+  // 이탈 중 놓친 채팅/투표/밤 행동/페이즈/탈락 델타를 스냅샷 재조회로 복원한다.
+  const { recoveryKey } = useNetworkRecovery();
+
   // 접속 상태(F020) — 게임 중에도 본인을 Presence에 track해 진행자 화면에 온라인으로 보이게 한다.
   // 이 화면은 다른 참가자의 배지를 렌더하지 않으므로 반환값은 사용하지 않는다(track 목적).
-  useGamePresence(player?.roomId ?? null, player?.id ?? null);
+  useGamePresence(player?.roomId ?? null, player?.id ?? null, recoveryKey);
 
   // 재접속 스냅샷(Task 013-2) — 본인 role·생존 여부를 한 번에 복원한다. role은 밤 행동 가능
   // 여부·비밀 채널 소속 계산에만 쓰이며, 남의 role은 어떤 경로로도 조회하지 않는다.
-  const { resume } = useGameResume(sessionToken);
+  const { resume } = useGameResume(sessionToken, recoveryKey);
   const role = resume?.role ?? null;
   const [players, setPlayers] = useState<RoomPlayer[]>([]);
+  // 참가자 스냅샷 재조회 중 PLAYER_ELIMINATED가 도착했는지 추적한다(코드 리뷰 반영) —
+  // 조회가 진행되는 사이 탈락 broadcast가 먼저 반영된 뒤 뒤늦게 도착한 stale 스냅샷이
+  // 그 상태를 덮어써 "탈락자가 다시 생존"으로 보이는 레이스를 막기 위함. 아래 참가자 목록
+  // 로드 effect에서 이 플래그를 보고 필요하면 한 번만 재조회한다(무한 재시도 방지).
+  const playersSnapshotStaleRef = useRef(false);
   const [nightActionTargetId, setNightActionTargetId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"public" | "secret" | "dm">("public");
   // winner는 게임 종료 상태 그 자체(한 번 확정되면 되돌리지 않는다) — 투표 패널을 감추는 근거.
@@ -124,6 +134,7 @@ export default function GamePlayPage() {
     roomId: player?.roomId ?? "",
     initialStatus: player?.roomStatus,
     onReset: () => router.replace("/game/waiting"),
+    recoveryKey,
   });
 
   // 세션 기반 라우팅 가드 — 세션 없으면 입장 화면, 아직 대기 중이면 대기실로.
@@ -137,16 +148,34 @@ export default function GamePlayPage() {
   }, [loading, player, router]);
 
   // 참가자 목록 — 생존 현황 칩·DM 대상·투표/밤 행동 대상 (role/session_token 미포함)
+  // fetch 진행 중 PLAYER_ELIMINATED가 도착하면(playersSnapshotStaleRef) stale 스냅샷을
+  // 그대로 적용하지 않고 1회 재조회한다 — 아래 탈락 구독 effect가 그 사이 반영한 델타를
+  // 잃지 않기 위함(재시도는 무한 루프 방지를 위해 최대 1회).
   useEffect(() => {
     if (!player) return;
     let cancelled = false;
-    getRoomPlayers(player.roomId).then((result) => {
-      if (!cancelled) setPlayers(result);
-    });
+    let retried = false;
+    playersSnapshotStaleRef.current = false;
+
+    const load = () => {
+      getRoomPlayers(player.roomId).then((result) => {
+        if (cancelled) return;
+        if (playersSnapshotStaleRef.current && !retried) {
+          retried = true;
+          playersSnapshotStaleRef.current = false;
+          load();
+          return;
+        }
+        playersSnapshotStaleRef.current = false;
+        setPlayers(result);
+      });
+    };
+    load();
+
     return () => {
       cancelled = true;
     };
-  }, [player]);
+  }, [player, recoveryKey]);
 
   // 비밀 채널 소속 — 본인 role로만 계산한다. 탭 자체는 소속과 무관하게 항상 노출된다(무차별 UI).
   const membership: SecretMembership = isHeretic(role)
@@ -163,6 +192,7 @@ export default function GamePlayPage() {
     roomId: player?.roomId ?? "",
     sessionToken: sessionToken ?? "",
     activeChannel,
+    recoveryKey,
   });
 
   const handleSend = async (channel: ChatChannel, text: string, recipientId?: string) => {
@@ -176,6 +206,7 @@ export default function GamePlayPage() {
   const { tally, myVote, castVote } = useGameVotes({
     roomId: player?.roomId ?? "",
     sessionToken: sessionToken ?? "",
+    recoveryKey,
   });
 
   const handleVote = async (targetId: string) => {
@@ -189,6 +220,7 @@ export default function GamePlayPage() {
   const { submitNightAction } = useGameNight({
     roomId: player?.roomId ?? "",
     sessionToken: sessionToken ?? "",
+    recoveryKey,
   });
 
   const handleNightAction = async (targetId: string) => {
@@ -209,6 +241,9 @@ export default function GamePlayPage() {
       .channel(roomChannel(player.roomId))
       .on("broadcast", { event: GAME_EVENTS.PLAYER_ELIMINATED }, ({ payload }) => {
         const { playerId } = payload as PlayerEliminatedPayload;
+        // 진행 중인 참가자 스냅샷 재조회가 있다면 그 결과가 이 델타보다 오래된 것일 수 있으니
+        // stale로 표시해 재조회를 유도한다(위 참가자 목록 로드 effect 참고).
+        playersSnapshotStaleRef.current = true;
         setPlayers((prev) =>
           prev.map((p) => (p.id === playerId ? { ...p, isAlive: false } : p)),
         );
@@ -231,7 +266,7 @@ export default function GamePlayPage() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [player]);
+  }, [player, recoveryKey]);
 
   // 재접속 안전망 — 이탈 중 게임이 이미 종료된 경우 GAME_ENDED broadcast를 놓치므로,
   // useGamePhase의 초기 스냅샷이 status='ended'로 도착하면 여기서도 결과를 불러온다.
@@ -287,7 +322,7 @@ export default function GamePlayPage() {
       {/* 내 역할 보기 — 버튼 문구는 역할과 무관하게 항상 동일 */}
       <Dialog>
         <DialogTrigger asChild>
-          <Button type="button" variant="secondary">
+          <Button type="button" variant="secondary" className="min-h-11">
             내 역할 보기
           </Button>
         </DialogTrigger>
@@ -353,10 +388,19 @@ export default function GamePlayPage() {
           value={activeTab}
           onValueChange={(value) => setActiveTab(value as "public" | "secret" | "dm")}
         >
-          <TabsList>
-            <TabsTrigger value="public">전체</TabsTrigger>
-            <TabsTrigger value="secret">비밀 채널</TabsTrigger>
-            <TabsTrigger value="dm">1:1</TabsTrigger>
+          {/* 탭 트리거 터치 영역 확보(Task 015) — group-data-* 변형까지 동일하게 지정해야
+              shadcn 기본 h-9(36px)를 44px로 안전하게 덮어쓴다(단순 h-11만 추가하면 특이도
+              충돌로 무시될 수 있다). */}
+          <TabsList className="group-data-[orientation=horizontal]/tabs:h-11">
+            <TabsTrigger value="public" className="min-h-11">
+              전체
+            </TabsTrigger>
+            <TabsTrigger value="secret" className="min-h-11">
+              비밀 채널
+            </TabsTrigger>
+            <TabsTrigger value="dm" className="min-h-11">
+              1:1
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="public">

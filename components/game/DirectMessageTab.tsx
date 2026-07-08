@@ -53,7 +53,7 @@ export function DirectMessageTab({
                 type="button"
                 size="sm"
                 variant={isSelected ? "default" : "outline"}
-                className={cn(!target.isAlive && "opacity-60")}
+                className={cn("min-h-11", !target.isAlive && "opacity-60")}
                 onClick={() => setSelectedTargetId(target.id)}
                 disabled={disabled}
                 aria-pressed={isSelected}

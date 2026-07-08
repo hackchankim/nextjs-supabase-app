@@ -41,6 +41,9 @@ interface UseGameChatOptions {
   sessionToken: string;
   /** 현재 활성 탭 채널 — 비활성 채널에 새 메시지가 도착하면 토스트로 알린다 */
   activeChannel?: ChatChannel | null;
+  /** (선택) 네트워크 복구 신호(useNetworkRecovery). 값이 바뀌면 스냅샷을 재조회하고
+   *  채널을 재구독한다 — 오프라인/백그라운드 중 놓친 메시지를 복원하기 위함. */
+  recoveryKey?: number;
 }
 
 interface UseGameChatResult {
@@ -58,6 +61,7 @@ export function useGameChat({
   roomId,
   sessionToken,
   activeChannel,
+  recoveryKey,
 }: UseGameChatOptions): UseGameChatResult {
   const [messagesByChannel, setMessagesByChannel] = useState<MessagesByChannel>(
     emptyMessagesByChannel,
@@ -93,7 +97,7 @@ export function useGameChat({
     return () => {
       cancelled = true;
     };
-  }, [sessionToken]);
+  }, [sessionToken, recoveryKey]);
 
   // 새 메시지를 채널별 state에 병합하고, 비활성 탭에 도착한 메시지는 토스트로 알린다.
   const appendMessage = useCallback((payload: ChatMessagePayload) => {
@@ -120,7 +124,7 @@ export function useGameChat({
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [roomId, appendMessage]);
+  }, [roomId, appendMessage, recoveryKey]);
 
   // 개인 인박스 채널 구독 — heretic/council/dm 델타.
   // 인박스 토큰은 서버 시크릿으로 계산되므로 클라이언트가 직접 만들 수 없어
@@ -149,7 +153,7 @@ export function useGameChat({
       cancelled = true;
       cleanup?.();
     };
-  }, [sessionToken, appendMessage]);
+  }, [sessionToken, appendMessage, recoveryKey]);
 
   const sendMessage = useCallback(
     (channel: ChatChannel, text: string, recipientId?: string) =>
