@@ -1144,6 +1144,68 @@ export async function getVoteState(token: string): Promise<VoteState | null> {
   };
 }
 
+export interface MyNightActionStatus {
+  /** 이번 phase에 본인 밤 행동을 확정했는지 여부 */
+  locked: boolean;
+  /** 확정한 대상 id (미확정이면 null) */
+  targetId: string | null;
+  /** 목사님(pastor)의 조사 결과 — investigate 행동을 확정한 경우에만 채워진다 */
+  investigation?: "heretic" | "saint";
+}
+
+/**
+ * 세션 토큰으로 현재 phase의 본인 밤 행동 확정 상태를 조회한다(잠금 여부 + 대상 + 조사 결과).
+ * game_night_actions는 actor_id로 본인 행만 조회하므로 다른 참가자의 행동은 절대 노출되지 않는다.
+ * 목사님의 조사 결과(investigation)는 submitNightAction과 동일하게 이 함수의 반환값에만
+ * 담기며, DB나 Broadcast에는 기록되지 않는다.
+ */
+export async function getMyNightActionStatus(token: string): Promise<MyNightActionStatus | null> {
+  const supabase = createAdminClient();
+  const actor = await getSenderContext(supabase, token);
+
+  if (!actor) {
+    return null;
+  }
+
+  const { data: room, error: roomError } = await supabase
+    .from("game_rooms")
+    .select("phase_number")
+    .eq("id", actor.roomId)
+    .maybeSingle();
+
+  if (roomError || !room) {
+    return null;
+  }
+
+  const { data: myAction } = await supabase
+    .from("game_night_actions")
+    .select("action_type, target_id")
+    .eq("room_id", actor.roomId)
+    .eq("phase_number", room.phase_number)
+    .eq("actor_id", actor.id)
+    .maybeSingle();
+
+  if (!myAction) {
+    return { locked: false, targetId: null };
+  }
+
+  if (myAction.action_type === "investigate") {
+    const { data: target } = await supabase
+      .from("game_players")
+      .select("role")
+      .eq("id", myAction.target_id)
+      .maybeSingle();
+
+    return {
+      locked: true,
+      targetId: myAction.target_id,
+      investigation: isHeretic((target?.role ?? null) as PlayerRole | null) ? "heretic" : "saint",
+    };
+  }
+
+  return { locked: true, targetId: myAction.target_id };
+}
+
 type CloseVotingResult =
   | { ok: true; eliminatedId: string; winner: Winner | null }
   | { ok: false; tie: true; candidates: { id: string; nickname: string; count: number }[] }
@@ -1392,19 +1454,36 @@ export async function submitNightAction(
       return { ok: false, error: "밤에 할 수 있는 행동이 없습니다" };
     }
 
-    const { error: upsertError } = await supabase.from("game_night_actions").upsert(
-      {
-        room_id: actor.roomId,
-        phase_number: room.phase_number,
-        actor_id: actor.id,
-        target_id: targetId,
-        action_type: actionType,
-      },
-      { onConflict: "room_id,phase_number,actor_id" },
-    );
+    const NIGHT_ACTION_LOCKED_ERROR =
+      "이미 이번 밤 행동을 확정했습니다. 다음 밤까지 변경할 수 없습니다";
 
-    if (upsertError) {
-      return { ok: false, error: `밤 행동 등록 실패: ${upsertError.message}` };
+    // 사전 조회 — 같은 밤 안에서 대상을 바꿔가며 재제출하는 것을 빠르게 막는다(1인 1행동 확정).
+    const { data: existingAction } = await supabase
+      .from("game_night_actions")
+      .select("id")
+      .eq("room_id", actor.roomId)
+      .eq("phase_number", room.phase_number)
+      .eq("actor_id", actor.id)
+      .maybeSingle();
+
+    if (existingAction) {
+      return { ok: false, error: NIGHT_ACTION_LOCKED_ERROR };
+    }
+
+    const { error: insertError } = await supabase.from("game_night_actions").insert({
+      room_id: actor.roomId,
+      phase_number: room.phase_number,
+      actor_id: actor.id,
+      target_id: targetId,
+      action_type: actionType,
+    });
+
+    if (insertError) {
+      // unique_violation(23505) — 사전 조회 이후 동시 요청이 먼저 삽입한 경우의 최종 방어선.
+      if (insertError.code === "23505") {
+        return { ok: false, error: NIGHT_ACTION_LOCKED_ERROR };
+      }
+      return { ok: false, error: `밤 행동 등록 실패: ${insertError.message}` };
     }
 
     const { completedCount, total } = await computeNightActionProgress(

@@ -115,7 +115,6 @@ export default function GamePlayPage() {
   // 그 상태를 덮어써 "탈락자가 다시 생존"으로 보이는 레이스를 막기 위함. 아래 참가자 목록
   // 로드 effect에서 이 플래그를 보고 필요하면 한 번만 재조회한다(무한 재시도 방지).
   const playersSnapshotStaleRef = useRef(false);
-  const [nightActionTargetId, setNightActionTargetId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"public" | "secret" | "dm">("public");
   // winner는 게임 종료 상태 그 자체(한 번 확정되면 되돌리지 않는다) — 투표 패널을 감추는 근거.
   // 종료 오버레이의 여닫기는 별도 상태(resultOpen)로 분리해, 닫아도 winner가 유지되도록 한다.
@@ -130,7 +129,13 @@ export default function GamePlayPage() {
   // 페이즈 실데이터 — 마운트 시 getRoomState 스냅샷 + PHASE_TRANSITION_*/PHASE_CHANGED/GAME_RESET
   // Broadcast로 실시간 동기화된다(player.roomStatus는 마운트 시 1회 스냅샷이라 더 이상 화면
   // 렌더링에 쓰지 않는다 — 초기 라우팅 가드에만 사용).
-  const { status, phaseNumber, transitionTo, transitionAt } = useGamePhase({
+  const {
+    status,
+    phaseNumber,
+    transitionTo,
+    transitionAt,
+    loading: phaseLoading,
+  } = useGamePhase({
     roomId: player?.roomId ?? "",
     initialStatus: player?.roomStatus,
     onReset: () => router.replace("/game/waiting"),
@@ -217,9 +222,19 @@ export default function GamePlayPage() {
   };
 
   // 밤 행동 실데이터 — 조사 결과(있다면)는 훅 내부에서 본인에게만 toast로 표시된다.
-  const { submitNightAction } = useGameNight({
+  // locked/lockedTargetId는 같은 밤 안에서 대상을 바꿔 재제출할 수 없게 하는 단일 소스다(Task 012-1).
+  const {
+    submitNightAction,
+    locked: nightActionLocked,
+    lockedTargetId: nightActionLockedTargetId,
+    investigation: nightActionInvestigation,
+  } = useGameNight({
     roomId: player?.roomId ?? "",
     sessionToken: sessionToken ?? "",
+    // useGamePhase 스냅샷 로딩 중에는 phaseNumber가 아직 임시값(0)이므로 null을 넘겨
+    // useGameNight의 리셋/재조회를 지연시킨다(재접속 시 0→실제값 전환에 의한 잠금 상태
+    // 순간 깜빡임 방지).
+    phaseNumber: phaseLoading ? null : phaseNumber,
     recoveryKey,
   });
 
@@ -227,9 +242,7 @@ export default function GamePlayPage() {
     const result = await submitNightAction(targetId);
     if (!result.ok) {
       toast.error(result.error);
-      return;
     }
-    setNightActionTargetId(targetId);
   };
 
   // 탈락/종료 구독 — 채팅·투표와는 별도 채널 인스턴스로 간단히 구독한다.
@@ -470,19 +483,20 @@ export default function GamePlayPage() {
           </CardContent>
         </Card>
       ) : (
-        <>
-          <ActionPanel
-            targets={aliveOthers}
-            canAct={canAct}
-            actionLabel="밤 행동"
-            onAction={(targetId) => void handleNightAction(targetId)}
-          />
-          {nightActionTargetId && (
-            <p className="text-center text-sm text-muted-foreground">
-              선택됨: {players.find((p) => p.id === nightActionTargetId)?.nickname}
-            </p>
-          )}
-        </>
+        <ActionPanel
+          targets={aliveOthers}
+          canAct={canAct}
+          actionLabel="밤 행동"
+          locked={nightActionLocked}
+          lockedTargetId={nightActionLockedTargetId}
+          // 닉네임은 생존자만 담긴 aliveOthers가 아닌 전체 players에서 조회한다 — 확정된 대상이
+          // 밤 사이 진행자에 의해 탈락 처리되어도(resolveNight) "확정됨:" 문구가 비지 않도록.
+          lockedTargetNickname={
+            players.find((p) => p.id === nightActionLockedTargetId)?.nickname
+          }
+          investigationResult={nightActionInvestigation}
+          onConfirm={(targetId) => void handleNightAction(targetId)}
+        />
       )}
 
       {/* 게임 종료 오버레이 — 승리 팀 발표 + 전원 역할 공개(getGameResult, status='ended' 가드
