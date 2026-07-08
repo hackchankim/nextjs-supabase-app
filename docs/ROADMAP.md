@@ -345,6 +345,26 @@
   - [x] 조사 결과가 목사님에게만 표시되는가 _(DB/broadcast/anon 직접조회 3중 격리 실증)_
   - [x] 밤 행동 완료 후 진행자 대시보드에 완료 현황이 표시되는가
 
+- **Task 012-1: 밤 행동 확정 UX 개선 (1회 제한 하드 락 + 선택→확정 2단계)** - 우선순위
+  > F010 스펙 보강 반영. 밤 행동(이단 대장 제거·목사님 조사·권사님 보호)을 "클릭 즉시 실행"에서 "대상 선택(하이라이트) → 별도 확정 버튼"의 2단계 UX로 전환하고, 페이즈당 1회 확정 후 다음 밤까지 하드 락을 건다(3개 역할 동일 적용).
+  - 문제: 현재 `submitNightAction`이 `game_night_actions`에 `.upsert(onConflict: room_id,phase_number,actor_id)`로 저장해, 같은 밤 안에서 몇 번이든 대상을 바꿔 재호출 가능. 목사님 조사 결과가 매번 토스트로 노출되어 사실상 한 밤에 여러 명 조사 가능(밸런스 문제, qa 중 발견)
+  - `lib/game/actions.ts`의 `submitNightAction`: `.upsert(...)` → `.insert(...)`로 교체해 기존 `unique(room_id, phase_number, actor_id)` 제약(스키마 변경 없이 재사용)을 실제 하드 락으로 활용. Postgres `23505`(unique_violation) 시 "이미 이번 밤 행동을 확정했습니다. 다음 밤까지 변경할 수 없습니다" 반환
+  - 신규 `getMyNightActionStatus(token)` Server Action 추가 — 본인이 이번 phase에 이미 확정했는지 + (목사님 조사였다면) 그 결과를 재조회. `getVoteState`(낮 투표, 동일 패턴 선례)와 동일하게 "세션 무효 시 null" 컨벤션
+  - `components/game/ActionPanel.tsx`: 대상 클릭이 즉시 제출되던 것을 로컬 `selectedId` state로 하이라이트만 하도록 바꾸고, 하단에 별도 확정 버튼(`min-h-11`) 추가. `locked`/`lockedTargetId`/`investigationResult` prop을 받아 확정 후 상태와 조사 결과를 패널 안에 지속 표시(현재는 토스트 1회성이라 놓치면 재확인 불가). role은 여전히 이 컴포넌트에서 참조하지 않는다(무차별 UI 유지)
+  - `lib/game/hooks/useGameNight.ts`: `phaseNumber`를 받아 마운트/phase 변경/네트워크 복구(recoveryKey) 시 `getMyNightActionStatus`로 잠금 상태를 복원하는 스냅샷 effect 추가(`useGameVotes`의 `myVote` 복원과 동일 패턴). `locked`/`lockedTargetId`/`investigation`을 결과로 반환
+  - `app/game/play/page.tsx`: 기존 `nightActionTargetId` 로컬 state 제거(단일 소스는 `useGameNight`), `ActionPanel` 연결부를 `onConfirm`/`locked`/`lockedTargetId`/`investigationResult`로 교체
+  - 이 규칙(선택→확정, 페이즈당 1회 잠금)은 이단 대장(제거)·목사님(조사)·권사님(보호) **3개 역할 모두에 동일 적용** — 서버·클라이언트가 역할을 구분하지 않아 무차별 UI 원칙과 충돌하지 않음
+  - 마이그레이션 불필요 — 기존 `unique(room_id, phase_number, actor_id)` 제약을 그대로 활용
+  - `resolveNight`/`getNightActionStatus`(진행자 대시보드)는 저장된 행을 읽기만 하므로 무영향(회귀 없음, 오히려 actor당 정확히 1행만 존재함이 더 확실히 보장됨)
+
+  ### 테스트 체크리스트
+  - [ ] 대상 선택 후 확정 버튼을 눌러야만 서버에 제출되는가 (클릭만으로 즉시 제출되지 않는가)
+  - [ ] 확정 후 같은 밤에 다른 대상을 선택/재확정할 수 없는가 (버튼 비활성 + 서버 직접 호출도 거부)
+  - [ ] 새로고침 후에도 확정 상태와 조사 결과가 그대로 복원되는가
+  - [ ] 다음 밤(phase_number 증가)에 잠금이 해제되고 선택이 초기화되는가
+  - [ ] 이단 대장 제거·권사님 보호도 목사님과 동일한 잠금 규칙·동일 UI 문구를 쓰는가 (조사 결과 문구만 값 유무로 자연 분기, 무차별 UI)
+  - [ ] 진행자 대시보드의 밤 행동 완료 현황(`getNightActionStatus`)과 `resolveNight` 처리가 기존과 동일하게 동작하는가 (회귀 없음)
+
 - **Task 013: 페이즈 전환 및 승리 조건 구현** ✅ - 완료 (auto-dev · end-to-end 완성)
   - ✅ 페이즈 전환 카운트다운 (F017): `startPhaseTransition(roomId, pin, nextStatus)` (PIN 재검증) → `transition_to`+`transition_at`(now+10초) → SCHEDULED broadcast. 전 클라 `transition_at` 기준 동기 10초 카운트다운(PhaseBanner). `cancelPhaseTransition`(PIN) → transition_* null → CANCELLED broadcast
   - ✅ 페이즈 전환 확정 `commitPhaseTransition(roomId)` — **PIN 없이** transition_at 경과+transition_to 설정 시에만, **조건부 UPDATE(`.not(transition_to,is,null)`)로 멱등**(여러 클라 동시 호출에도 첫 호출만 부작용) → status day↔night, 밤→낮에 phase_number 증가, transition_* 초기화, 시스템 메시지 자동 발송, PHASE_CHANGED broadcast. **진행자 이탈에도 전환 보장**(어느 클라든 경과 시 호출)
