@@ -445,12 +445,21 @@
 
 ### Phase 4: 고급 기능 및 최적화
 
-- **Task 015: 모바일 UX 최적화**
-  - 터치 영역 최적화 (최소 버튼 크기 48px 이상)
-  - 채팅 입력 시 모바일 키보드 올라올 때 레이아웃 깨짐 방지
-  - `manifest.json` + 아이콘 추가 (PWA — 홈 화면에 추가 가능)
-  - Supabase Realtime 재연결 로직 (앱 백그라운드 전환 후 복귀 시)
-  - 오프라인 상태 감지 + 재연결 안내 토스트
+- **Task 015: 모바일 UX 최적화** ✅ - 완료 (auto-dev · 브랜치 auto/mobile-ux)
+  - ✅ 터치 영역 최적화 — 게임 화면 주요 버튼·탭 트리거·투표/행동 대상에 `min-h-11`(44px) 적용, shadcn 전역 파일(components/ui/*)은 미수정. 390×844 실측 전 항목 ≥44px
+  - ✅ 채팅 입력 시 모바일 키보드 레이아웃 대응 — ChatPanel 목록을 실동작하는 내부 스크롤(`h-[38dvh] min-h-48`)로 교체(기존 `h-72 flex-1`은 부모 높이 부재로 죽은 코드였음), 입력바 `shrink-0`, viewport `interactiveWidget: "resizes-content"`. 390×844 초기 화면에서 입력창+전송 버튼 완전 노출(실측 bottom 794.7≤844)
+  - ✅ PWA — `app/manifest.ts`(standalone·start_url /game·lang ko) + 아이콘 192/512(any+maskable, `scripts/generate-pwa-icons.mjs`가 의존성 없이 순수 Node zlib로 PNG 직접 인코딩, `npm run generate:icons`) + apple-touch-icon(iOS) + `html lang="ko"` + 스타터킷 잔재 title/description 교체. **`proxy.ts` matcher에 `manifest.webmanifest` 예외 추가** — 비로그인 참가자(주 사용자)가 307 리다이렉트로 manifest를 못 받던 문제 해결(QA에서 발견)
+  - ✅ Realtime 재연결 — 신규 `useNetworkRecovery` 훅(online/offline/visibilitychange→visible 시 recoveryKey 증가)을 데이터 훅 6종(chat/votes/night/phase/presence/resume)의 effect deps에 주입해 백그라운드/오프라인 복귀 시 스냅샷 재조회+채널 재구독. waiting/admin 참가자 목록은 "최초=병합, 복구=전체 교체" 분기로 놓친 PLAYER_LEFT 반영. **stale 스냅샷 race 가드**(fetch 중 broadcast 선반영 시 stale 적용 대신 1회 재조회 — code-reviewer 높음 지적 반영) + **대기실 복구 시 자기 강퇴 감지**(목록에 본인 부재 → alert+세션 정리+/game 복귀)
+  - ✅ 오프라인 상태 감지 + 재연결 안내 — sonner 토스트(오프라인 에러/재연결 성공, 루트 Toaster 재사용). visible 복귀는 토스트 없이 조용히 재조회
+  - 📝 백로그: 동일 room topic에 페이지당 6~8개 독립 채널이 recoveryKey마다 일괄 재구독됨(소규모 인원에선 무해, 채널 공유 리팩토링은 추후) · admin 투표 tally는 세션 토큰이 없어 복구 재조회 수단 부재(기존 아키텍처 한계)
+
+  ### 테스트 체크리스트 (qa-tester 최종 4/4 PASS · 초회 5/8→manifest 307·채팅 잘림 수정 후 재검증)
+  - [x] 390×844에서 주요 터치 대상이 44px 이상인가 _(입장·나가기·전송·탭 3종·투표 버튼 9종 실측)_
+  - [x] /manifest.webmanifest이 비로그인 200 + 아이콘 로드 + 콘솔 Manifest 에러 0인가
+  - [x] 채팅 입력창이 초기 화면에 완전 노출되고 목록은 내부 스크롤인가 (가로 스크롤 없음)
+  - [x] 오프라인 전환 시 토스트, 복귀 시 재연결 토스트가 뜨는가
+  - [x] 오프라인 중 놓친 변경(SQL 직접 INSERT·본인 강퇴)이 online 복귀 시 스냅샷 재조회로 복원되는가
+  - [x] 무차별 UI 회귀 없음 (이단 대장 vs 목사님 화면 구조 동일 — 정식 검증은 Task 017)
 
 - **Task 016: 배포 및 운영 준비**
   - Vercel 배포 설정 및 환경 변수 구성
