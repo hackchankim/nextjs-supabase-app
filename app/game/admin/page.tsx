@@ -14,6 +14,7 @@
 // 이 태스크 범위 밖이다(전자는 미구현, 후자는 승리 조건 자동 판정으로 대체).
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import QRCode from "qrcode";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -48,6 +49,7 @@ import { useGamePhase } from "@/lib/game/hooks/useGamePhase";
 import { useGamePresence } from "@/lib/game/hooks/useGamePresence";
 import { useNetworkRecovery } from "@/lib/game/hooks/useNetworkRecovery";
 import { ROLE_LABELS, MIN_PLAYERS, WINNER_LABELS } from "@/lib/game/constants";
+import { getRoleDistribution } from "@/lib/game/utils";
 import {
   GAME_EVENTS,
   roomChannel,
@@ -117,6 +119,10 @@ export default function GameAdminPage() {
   const [eliminateError, setEliminateError] = useState<string | null>(null);
   const [isResetting, setIsResetting] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
+
+  // 참가 QR코드(대기실 전용, Task 016) — qrcode 라이브러리로 순수 로컬 렌더링한다(네트워크 호출 없음).
+  // window.location은 클라이언트 마운트 후에만 접근 가능하므로 effect 안에서 생성한다.
+  const [qrCode, setQrCode] = useState<{ dataUrl: string; url: string } | null>(null);
 
   // 밤 행동 완료 현황(Task 012) — getNightActionStatus 실데이터 + NIGHT_ACTION_UPDATE 구독 시 재조회.
   const [nightActors, setNightActors] = useState<NightActorStatus[]>([]);
@@ -197,6 +203,26 @@ export default function GameAdminPage() {
       router.replace("/game");
     }
   }, [ctxChecked, adminCtx, router]);
+
+  // 참가 QR코드 생성(대기실 상태에서만 의미가 있다) — 게임이 시작되면 더 이상 새 참가자를
+  // 받지 않으므로 상태가 바뀌면 재생성하지 않는다.
+  useEffect(() => {
+    if (status !== "waiting") return;
+
+    let cancelled = false;
+    const joinUrl = `${window.location.origin}/game`;
+    QRCode.toDataURL(joinUrl)
+      .then((dataUrl) => {
+        if (!cancelled) setQrCode({ dataUrl, url: joinUrl });
+      })
+      .catch(() => {
+        if (!cancelled) setQrCode(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [status]);
 
   // 초기 참가자 목록 로드 — broadcast로 먼저 들어온 참가자를 덮어쓰지 않도록 병합한다.
   // 단, 네트워크 복구로 인한 재조회(recoveryKey 변경)는 서버 목록을 그대로 신뢰해야 한다 —
@@ -317,6 +343,9 @@ export default function GameAdminPage() {
   // 게임 시작 가능 여부는 실제 game_rooms.status(useGamePhase)로 판단한다 —
   // 별도의 로컬 "시작됨" 플래그를 두지 않아 새로고침/재접속 후에도 항상 정확하다.
   const canStartGame = players.length >= MIN_PLAYERS && status === "waiting";
+  // 역할 배분 미리보기(Task 016) — canStartGame일 때만 렌더링에 사용하지만, 계산 자체는
+  // 순수 함수라 조건 없이 미리 구해둔다(불필요한 재계산 방지).
+  const previewDistribution = getRoleDistribution(players.length);
 
   const handleStartGame = useCallback(async () => {
     if (!adminCtx) return;
@@ -589,6 +618,29 @@ export default function GameAdminPage() {
 
         {/* 제어 탭 — 진행자 전용 화면. 역할을 표로 노출하는 것이 스펙상 정상 동작 */}
         <TabsContent value="control" className="flex flex-col gap-6">
+          {/* 참가 QR코드 — 대기실(참가자 모집 중)에만 의미가 있다. 진행자가 화면에 띄우거나
+              구두로 URL을 불러줄 수 있도록 텍스트도 함께 표시한다. */}
+          {status === "waiting" && (
+            <div className="flex flex-col items-center gap-2 rounded-lg border p-4">
+              <span className="text-sm font-medium text-muted-foreground">참가 QR코드</span>
+              {qrCode ? (
+                <>
+                  {/* eslint-disable-next-line @next/next/no-img-element -- data URI(로컬 생성)라 next/image 최적화 대상이 아님 */}
+                  <img
+                    src={qrCode.dataUrl}
+                    alt="게임 참가 페이지(/game)로 연결되는 QR코드"
+                    width={192}
+                    height={192}
+                    className="h-48 w-48"
+                  />
+                  <code className="text-sm text-muted-foreground">{qrCode.url}</code>
+                </>
+              ) : (
+                <p className="text-sm text-muted-foreground">QR코드를 생성하는 중입니다...</p>
+              )}
+            </div>
+          )}
+
           {/* 참가자 관리 표 (닉네임 / 역할 / 생존 여부 / 접속 상태 + 탈락 처리/강퇴) */}
           <div className="overflow-x-auto rounded-lg border">
             <table className="w-full text-sm">
@@ -668,15 +720,27 @@ export default function GameAdminPage() {
               현재 인원 {players.length} / 최소 {MIN_PLAYERS}명
             </span>
             {canStartGame ? (
-              <Button
-                type="button"
-                size="lg"
-                className="min-h-11"
-                onClick={() => void handleStartGame()}
-                disabled={isStarting}
-              >
-                게임 시작
-              </Button>
+              <>
+                {/* 역할 배분 미리보기 — 실제 배정은 게임 시작 시점에 서버에서 확정되므로
+                    여기서는 getRoleDistribution(순수 함수)로 계산만 미리 보여준다. */}
+                <p className="text-sm text-muted-foreground">
+                  예상 배분 — {ROLE_LABELS.heretic} {previewDistribution.heretic}명 ·{" "}
+                  {ROLE_LABELS.heretic_leader} {previewDistribution.heretic_leader}명 ·{" "}
+                  {ROLE_LABELS.pastor} {previewDistribution.pastor}명 ·{" "}
+                  {ROLE_LABELS.elder} {previewDistribution.elder}명 ·{" "}
+                  {ROLE_LABELS.deaconess} {previewDistribution.deaconess}명 ·{" "}
+                  {ROLE_LABELS.saint} {previewDistribution.saint}명
+                </p>
+                <Button
+                  type="button"
+                  size="lg"
+                  className="min-h-11"
+                  onClick={() => void handleStartGame()}
+                  disabled={isStarting}
+                >
+                  게임 시작
+                </Button>
+              </>
             ) : status !== "waiting" ? (
               <p className="text-sm text-muted-foreground">게임이 시작되었습니다.</p>
             ) : (

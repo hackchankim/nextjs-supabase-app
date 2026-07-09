@@ -48,6 +48,9 @@ export const WINNER_LABELS: Record<Winner, string> = {
 export const MIN_PLAYERS = 5;
 export const MAX_PLAYERS = 20;
 
+/** 방 생성 후 이 시간(ms)이 지나면 다음 행사 진입 시 세션을 자동 리셋한다 (24시간) */
+export const SESSION_EXPIRY_MS = 24 * 60 * 60 * 1000;
+
 /** 인원별 역할 배분표 (대표 인원수) — 그 외 인원은 getRoleDistribution()이 계산 */
 export const ROLE_DISTRIBUTION_TABLE: Record<number, RoleDistribution> = {
   5: { heretic: 1, heretic_leader: 1, pastor: 1, elder: 1, deaconess: 1, saint: 0 },
