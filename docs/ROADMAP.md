@@ -345,6 +345,28 @@
   - [x] 조사 결과가 목사님에게만 표시되는가 _(DB/broadcast/anon 직접조회 3중 격리 실증)_
   - [x] 밤 행동 완료 후 진행자 대시보드에 완료 현황이 표시되는가
 
+- **Task 012-1: 밤 행동 확정 UX 개선 (1회 제한 하드 락 + 선택→확정 2단계)** ✅ - 완료 (auto-dev · 브랜치 auto/night-action-confirm)
+  > F010 스펙 보강 반영. 밤 행동(이단 대장 제거·목사님 조사·권사님 보호)을 "클릭 즉시 실행"에서 "대상 선택(하이라이트) → 별도 확정 버튼"의 2단계 UX로 전환하고, 페이즈당 1회 확정 후 다음 밤까지 하드 락을 건다(3개 역할 동일 적용).
+  - ✅ 문제: 기존 `submitNightAction`이 `game_night_actions`에 `.upsert(onConflict: room_id,phase_number,actor_id)`로 저장해, 같은 밤 안에서 몇 번이든 대상을 바꿔 재호출 가능했음. 목사님 조사 결과가 매번 토스트로 노출되어 사실상 한 밤에 여러 명 조사 가능(밸런스 문제, qa 중 발견)
+  - ✅ `lib/game/actions.ts`의 `submitNightAction`: 사전 `SELECT`(빠른 실패) + `.insert(...)`로 교체해 기존 `unique(room_id, phase_number, actor_id)` 제약(스키마 변경 없이 재사용)을 실제 하드 락으로 활용. Postgres `23505`(unique_violation, 사전조회 이후 동시요청의 최종 방어선) 시 "이미 이번 밤 행동을 확정했습니다. 다음 밤까지 변경할 수 없습니다" 반환 — **DB 레벨에서 실제로 우회 불가함을 qa-tester가 UNIQUE 제약으로 실증**
+  - ✅ 신규 `getMyNightActionStatus(token)` Server Action — 본인이 이번 phase에 이미 확정했는지 + (목사님 조사였다면) 그 결과를 재조회. `getVoteState`(낮 투표, 동일 패턴 선례)와 동일하게 "세션 무효 시 null" 컨벤션. investigate 판정은 `isHeretic(target?.role ?? null)`로 명시적 정규화
+  - ✅ `components/game/ActionPanel.tsx`: 대상 클릭이 로컬 `selectedId` state로 하이라이트만 하도록 변경, 하단에 별도 확정 버튼(`min-h-11`) 추가. `locked`/`lockedTargetId`/`lockedTargetNickname`/`investigationResult` prop으로 확정 후 상태와 조사 결과를 패널 안에 지속 표시(토스트는 1회성이라 놓치면 재확인 불가하던 문제 해결). role은 여전히 이 컴포넌트에서 참조하지 않는다(무차별 UI 유지)
+  - ✅ `lib/game/hooks/useGameNight.ts`: `phaseNumber`(로딩 중엔 `null`)를 받아 마운트/phase 변경/네트워크 복구(recoveryKey) 시 `getMyNightActionStatus`로 잠금 상태를 복원(`useGameVotes`의 `myVote` 복원과 동일 패턴). `phaseNumberRef`로 확정 응답의 stale closure(확정 직후 phase가 바뀌는 경합)를 가드 — 응답 시점 phase가 현재와 다르면 로컬 상태 반영을 스킵
+  - ✅ `app/game/play/page.tsx`: 기존 `nightActionTargetId` 로컬 state 제거(단일 소스는 `useGameNight`), `ActionPanel` 연결부를 `onConfirm`/`locked`/`lockedTargetId`/`lockedTargetNickname`/`investigationResult`로 교체. 닉네임은 생존자만 담긴 `aliveOthers`가 아닌 전체 `players`에서 조회해 **밤 사이 대상이 탈락해도 "확정됨" 문구가 빈칸이 되지 않도록** 처리(code-reviewer 중간 지적 반영)
+  - ✅ `useGamePhase`의 `phaseNumber`가 `0`(초기값)→실값으로 바뀌는 전환에서 `useGameNight`가 잠금 상태를 순간 리셋했다가 재조회하는 깜빡임을 `loading` 플래그로 가드(로딩 완료 전엔 `phaseNumber: null`을 넘겨 effect 자체를 skip)
+  - ✅ 이 규칙(선택→확정, 페이즈당 1회 잠금)은 이단 대장(제거)·목사님(조사)·권사님(보호) **3개 역할 모두에 동일 적용** — 서버·클라이언트가 역할을 구분하지 않아 무차별 UI 원칙과 충돌하지 않음
+  - ✅ 마이그레이션 불필요 — 기존 `unique(room_id, phase_number, actor_id)` 제약을 그대로 활용
+  - ✅ `resolveNight`/`getNightActionStatus`(진행자 대시보드)는 저장된 행을 읽기만 하므로 무영향(회귀 없음, qa-tester가 diff 없음으로 재확인)
+  - 📝 **범위 밖 발견(회귀 아님, 백로그)**: 진행자 대시보드의 밤 행동 완료 체크리스트가 낮→밤 전환 직후 잠시 이전 밤 상태를 보여주다 첫 확정 시에야 갱신됨 — `app/game/admin/page.tsx`의 `loadNightStatus` 재조회 effect가 `phaseNumber`를 deps에 포함하지 않는 기존(이번 브랜치 미수정) 이슈
+
+  ### 테스트 체크리스트
+  - [x] 대상 선택 후 확정 버튼을 눌러야만 서버에 제출되는가 (클릭만으로 즉시 제출되지 않는가) _(네트워크 요청·game_night_actions 행 생성 시점으로 실증)_
+  - [x] 확정 후 같은 밤에 다른 대상을 선택/재확정할 수 없는가 (버튼 비활성 + 서버 직접 호출도 거부) _(UNIQUE 제약으로 DB 레벨 실증)_
+  - [x] 새로고침 후에도 확정 상태와 조사 결과가 그대로 복원되는가
+  - [x] 다음 밤(phase_number 증가)에 잠금이 해제되고 선택이 초기화되는가 _(phase_number별 별도 행 생성 SQL 확인)_
+  - [x] 이단 대장 제거·권사님 보호도 목사님과 동일한 잠금 규칙·동일 UI 문구를 쓰는가 (조사 결과 문구만 값 유무로 자연 분기, 무차별 UI) _(3역할 실측 비교)_
+  - [x] 진행자 대시보드의 밤 행동 완료 현황(`getNightActionStatus`)과 `resolveNight` 처리가 기존과 동일하게 동작하는가 (회귀 없음)
+
 - **Task 013: 페이즈 전환 및 승리 조건 구현** ✅ - 완료 (auto-dev · end-to-end 완성)
   - ✅ 페이즈 전환 카운트다운 (F017): `startPhaseTransition(roomId, pin, nextStatus)` (PIN 재검증) → `transition_to`+`transition_at`(now+10초) → SCHEDULED broadcast. 전 클라 `transition_at` 기준 동기 10초 카운트다운(PhaseBanner). `cancelPhaseTransition`(PIN) → transition_* null → CANCELLED broadcast
   - ✅ 페이즈 전환 확정 `commitPhaseTransition(roomId)` — **PIN 없이** transition_at 경과+transition_to 설정 시에만, **조건부 UPDATE(`.not(transition_to,is,null)`)로 멱등**(여러 클라 동시 호출에도 첫 호출만 부작용) → status day↔night, 밤→낮에 phase_number 증가, transition_* 초기화, 시스템 메시지 자동 발송, PHASE_CHANGED broadcast. **진행자 이탈에도 전환 보장**(어느 클라든 경과 시 호출)
@@ -445,12 +467,21 @@
 
 ### Phase 4: 고급 기능 및 최적화
 
-- **Task 015: 모바일 UX 최적화**
-  - 터치 영역 최적화 (최소 버튼 크기 48px 이상)
-  - 채팅 입력 시 모바일 키보드 올라올 때 레이아웃 깨짐 방지
-  - `manifest.json` + 아이콘 추가 (PWA — 홈 화면에 추가 가능)
-  - Supabase Realtime 재연결 로직 (앱 백그라운드 전환 후 복귀 시)
-  - 오프라인 상태 감지 + 재연결 안내 토스트
+- **Task 015: 모바일 UX 최적화** ✅ - 완료 (auto-dev · 브랜치 auto/mobile-ux)
+  - ✅ 터치 영역 최적화 — 게임 화면 주요 버튼·탭 트리거·투표/행동 대상에 `min-h-11`(44px) 적용, shadcn 전역 파일(components/ui/*)은 미수정. 390×844 실측 전 항목 ≥44px
+  - ✅ 채팅 입력 시 모바일 키보드 레이아웃 대응 — ChatPanel 목록을 실동작하는 내부 스크롤(`h-[38dvh] min-h-48`)로 교체(기존 `h-72 flex-1`은 부모 높이 부재로 죽은 코드였음), 입력바 `shrink-0`, viewport `interactiveWidget: "resizes-content"`. 390×844 초기 화면에서 입력창+전송 버튼 완전 노출(실측 bottom 794.7≤844)
+  - ✅ PWA — `app/manifest.ts`(standalone·start_url /game·lang ko) + 아이콘 192/512(any+maskable, `scripts/generate-pwa-icons.mjs`가 의존성 없이 순수 Node zlib로 PNG 직접 인코딩, `npm run generate:icons`) + apple-touch-icon(iOS) + `html lang="ko"` + 스타터킷 잔재 title/description 교체. **`proxy.ts` matcher에 `manifest.webmanifest` 예외 추가** — 비로그인 참가자(주 사용자)가 307 리다이렉트로 manifest를 못 받던 문제 해결(QA에서 발견)
+  - ✅ Realtime 재연결 — 신규 `useNetworkRecovery` 훅(online/offline/visibilitychange→visible 시 recoveryKey 증가)을 데이터 훅 6종(chat/votes/night/phase/presence/resume)의 effect deps에 주입해 백그라운드/오프라인 복귀 시 스냅샷 재조회+채널 재구독. waiting/admin 참가자 목록은 "최초=병합, 복구=전체 교체" 분기로 놓친 PLAYER_LEFT 반영. **stale 스냅샷 race 가드**(fetch 중 broadcast 선반영 시 stale 적용 대신 1회 재조회 — code-reviewer 높음 지적 반영) + **대기실 복구 시 자기 강퇴 감지**(목록에 본인 부재 → alert+세션 정리+/game 복귀)
+  - ✅ 오프라인 상태 감지 + 재연결 안내 — sonner 토스트(오프라인 에러/재연결 성공, 루트 Toaster 재사용). visible 복귀는 토스트 없이 조용히 재조회
+  - 📝 백로그: 동일 room topic에 페이지당 6~8개 독립 채널이 recoveryKey마다 일괄 재구독됨(소규모 인원에선 무해, 채널 공유 리팩토링은 추후) · admin 투표 tally는 세션 토큰이 없어 복구 재조회 수단 부재(기존 아키텍처 한계)
+
+  ### 테스트 체크리스트 (qa-tester 최종 4/4 PASS · 초회 5/8→manifest 307·채팅 잘림 수정 후 재검증)
+  - [x] 390×844에서 주요 터치 대상이 44px 이상인가 _(입장·나가기·전송·탭 3종·투표 버튼 9종 실측)_
+  - [x] /manifest.webmanifest이 비로그인 200 + 아이콘 로드 + 콘솔 Manifest 에러 0인가
+  - [x] 채팅 입력창이 초기 화면에 완전 노출되고 목록은 내부 스크롤인가 (가로 스크롤 없음)
+  - [x] 오프라인 전환 시 토스트, 복귀 시 재연결 토스트가 뜨는가
+  - [x] 오프라인 중 놓친 변경(SQL 직접 INSERT·본인 강퇴)이 online 복귀 시 스냅샷 재조회로 복원되는가
+  - [x] 무차별 UI 회귀 없음 (이단 대장 vs 목사님 화면 구조 동일 — 정식 검증은 Task 017)
 
 - **Task 016: 배포 및 운영 준비**
   - Vercel 배포 설정 및 환경 변수 구성

@@ -18,7 +18,7 @@ export function VoteButton({ target, isSelected, onVote, disabled }: VoteButtonP
     <Button
       type="button"
       variant={isSelected ? "default" : "outline"}
-      className="w-full justify-start"
+      className="min-h-11 w-full justify-start"
       onClick={() => onVote(target.id)}
       disabled={disabled}
       aria-pressed={isSelected}

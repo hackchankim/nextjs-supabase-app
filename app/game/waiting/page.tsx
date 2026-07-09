@@ -5,7 +5,7 @@
 // 실시간 참가자 목록은 서버가 정제된 페이로드만 Broadcast로 송출하는 채널(room:{roomId})을
 // 구독해 받는다. Postgres Changes는 사용하지 않는다(anon에게 role/session_token까지
 // 전체 행이 노출되는 것이 실측으로 확인됨).
-import { useCallback, useEffect, useState, useTransition } from "react";
+import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
@@ -20,6 +20,7 @@ import {
 } from "@/lib/game/realtime";
 import { useGamePresence } from "@/lib/game/hooks/useGamePresence";
 import { useGameSession } from "@/lib/game/hooks/useGameSession";
+import { useNetworkRecovery } from "@/lib/game/hooks/useNetworkRecovery";
 import { createClient } from "@/lib/supabase/client";
 import type { GamePlayer } from "@/lib/game/types";
 
@@ -45,10 +46,22 @@ export default function GameWaitingPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [leaveError, setLeaveError] = useState<string | null>(null);
   const [isLeaving, startLeaving] = useTransition();
+  // 참가자 목록 최초 로드 완료 여부 — true가 되면 이후 재조회(recoveryKey 변경)는
+  // 병합이 아닌 전체 교체로 처리한다(아래 참가자 목록 로드 effect 참고).
+  const didInitialFetchRef = useRef(false);
+  // 전체 교체(재조회) 중 PLAYER_JOINED/PLAYER_LEFT가 도착했는지 추적한다(코드 리뷰 반영) —
+  // fetch가 진행되는 사이 delta가 먼저 반영된 뒤 뒤늦게 도착한 stale 스냅샷이 그 상태를
+  // 덮어쓰는 레이스를 막기 위함. 최초 마운트의 병합 경로는 이 레이스에 안전하므로(union만
+  // 하고 제거는 하지 않음) 대상이 아니다 — 전체 교체 분기에서만 사용한다.
+  const playersSnapshotStaleRef = useRef(false);
+
+  // 오프라인/백그라운드 복귀 감지(Task 015) — recoveryKey를 아래 스냅샷 재조회·채널 재구독에
+  // 흘려보내 이탈 중 놓친 참가자 입장/게임 시작 이벤트를 복원한다.
+  const { recoveryKey } = useNetworkRecovery();
 
   // 접속 상태(F020) — 본인을 Presence에 track하고(진행자 화면에 온라인으로 보이도록)
   // 동시에 다른 참가자의 온라인 여부를 읽어 카드에 배지로 표시한다.
-  const onlineIds = useGamePresence(player?.roomId ?? null, player?.id ?? null);
+  const onlineIds = useGamePresence(player?.roomId ?? null, player?.id ?? null, recoveryKey);
 
   // 대기실에서 스스로 나가기(F021) — 본인 세션으로 leaveGame 호출 후 세션을 정리하고 입장 화면으로.
   const handleLeave = useCallback(() => {
@@ -83,27 +96,64 @@ export default function GameWaitingPage() {
   }, [loading, player, router]);
 
   // 초기 참가자 목록 로드 — broadcast로 먼저 들어온 참가자를 덮어쓰지 않도록 병합한다.
+  // 단, 네트워크 복구로 인한 재조회(recoveryKey 변경)는 서버 목록을 그대로 신뢰해야 한다 —
+  // 이탈 중 놓친 PLAYER_LEFT(퇴장/강퇴)까지 정확히 반영하려면 병합이 아닌 전체 교체가 필요하다.
+  // 전체 교체 분기는 fetch 진행 중 도착한 delta(playersSnapshotStaleRef)가 있으면 stale
+  // 스냅샷을 적용하지 않고 1회 재조회한다(재시도는 무한 루프 방지를 위해 최대 1회).
   useEffect(() => {
     if (!player) return;
 
     let cancelled = false;
-    getRoomPlayers(player.roomId)
-      .then((initialPlayers) => {
-        if (cancelled) return;
-        setPlayers((prev) => {
-          const byId = new Map(prev.map((p) => [p.id, p]));
-          initialPlayers.forEach((p) => byId.set(p.id, p));
-          return Array.from(byId.values());
+    let retried = false;
+    const isRecoveryRefetch = didInitialFetchRef.current;
+    if (isRecoveryRefetch) {
+      playersSnapshotStaleRef.current = false;
+    }
+
+    const load = () => {
+      getRoomPlayers(player.roomId)
+        .then((initialPlayers) => {
+          if (cancelled) return;
+          if (isRecoveryRefetch) {
+            if (playersSnapshotStaleRef.current && !retried) {
+              retried = true;
+              playersSnapshotStaleRef.current = false;
+              load();
+              return;
+            }
+            playersSnapshotStaleRef.current = false;
+
+            // 본인이 오프라인/백그라운드 상태였던 사이 진행자에 의해 강퇴됐다면 서버 목록에
+            // 본인이 더 이상 없다 — PLAYER_LEFT broadcast의 self-check와 동일하게 처리한다
+            // (그 broadcast 자체를 놓쳤을 가능성이 높으므로 재조회 결과로 직접 판단해야 한다).
+            const stillPresent = initialPlayers.some((p) => p.id === player.id);
+            if (!stillPresent) {
+              window.alert("진행자에 의해 대기실에서 내보내졌습니다.");
+              clearSession();
+              router.replace("/game");
+              return;
+            }
+
+            setPlayers(initialPlayers);
+          } else {
+            setPlayers((prev) => {
+              const byId = new Map(prev.map((p) => [p.id, p]));
+              initialPlayers.forEach((p) => byId.set(p.id, p));
+              return Array.from(byId.values());
+            });
+          }
+          didInitialFetchRef.current = true;
+        })
+        .catch(() => {
+          if (!cancelled) setLoadError("참가자 목록을 불러오지 못했습니다");
         });
-      })
-      .catch(() => {
-        if (!cancelled) setLoadError("참가자 목록을 불러오지 못했습니다");
-      });
+    };
+    load();
 
     return () => {
       cancelled = true;
     };
-  }, [player]);
+  }, [player, recoveryKey, clearSession, router]);
 
   const handleGameStarted = useCallback(() => {
     router.push("/game/play");
@@ -117,6 +167,7 @@ export default function GameWaitingPage() {
     const channel = supabase
       .channel(roomChannel(player.roomId))
       .on("broadcast", { event: GAME_EVENTS.PLAYER_JOINED }, ({ payload }) => {
+        playersSnapshotStaleRef.current = true;
         const joined = payload as PlayerJoinedPayload;
         setPlayers((prev) => {
           if (prev.some((p) => p.id === joined.id)) return prev;
@@ -127,6 +178,7 @@ export default function GameWaitingPage() {
         handleGameStarted();
       })
       .on("broadcast", { event: GAME_EVENTS.PLAYER_LEFT }, ({ payload }) => {
+        playersSnapshotStaleRef.current = true;
         const { playerId } = payload as PlayerLeftPayload;
         // 본인이 진행자에 의해 강퇴된 경우 — 남은 session_token은 이미 삭제된 레코드를
         // 가리키므로 즉시 세션을 정리하고 입장 화면으로 돌려보낸다(play 화면의 자기 탈락
@@ -144,7 +196,7 @@ export default function GameWaitingPage() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [player, handleGameStarted, clearSession, router]);
+  }, [player, handleGameStarted, clearSession, router, recoveryKey]);
 
   if (loading || !player) {
     return null;
@@ -182,6 +234,7 @@ export default function GameWaitingPage() {
         <Button
           type="button"
           variant="outline"
+          className="min-h-11"
           onClick={handleLeave}
           disabled={isLeaving}
         >

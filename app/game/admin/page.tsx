@@ -12,7 +12,7 @@
 // Task 013에서 페이즈 전환(예약/취소/자동 확정)·수동 탈락 처리·게임 리셋을 useGamePhase +
 // 해당 Server Action들로 연결해 더미 상태를 모두 제거했다. 시스템 메시지 발송/강제 게임 종료는
 // 이 태스크 범위 밖이다(전자는 미구현, 후자는 승리 조건 자동 판정으로 대체).
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
@@ -46,6 +46,7 @@ import {
 } from "@/lib/game/actions";
 import { useGamePhase } from "@/lib/game/hooks/useGamePhase";
 import { useGamePresence } from "@/lib/game/hooks/useGamePresence";
+import { useNetworkRecovery } from "@/lib/game/hooks/useNetworkRecovery";
 import { ROLE_LABELS, MIN_PLAYERS, WINNER_LABELS } from "@/lib/game/constants";
 import {
   GAME_EVENTS,
@@ -85,8 +86,20 @@ export default function GameAdminPage() {
   const [adminCtx, setAdminCtx] = useState<AdminCtx | null>(null);
   const [ctxChecked, setCtxChecked] = useState(false);
 
+  // 오프라인/백그라운드 복귀 감지(Task 015) — recoveryKey를 아래 실데이터 훅·구독에 흘려보내
+  // 이탈 중 놓친 참가자 입장/퇴장/투표/탈락/페이즈 델타를 스냅샷 재조회로 복원한다.
+  const { recoveryKey } = useNetworkRecovery();
+
   // 실데이터 참가자 목록
   const [players, setPlayers] = useState<GamePlayer[]>([]);
+  // 참가자 목록 최초 로드 완료 여부 — true가 되면 이후 재조회(recoveryKey 변경)는
+  // 병합이 아닌 전체 교체로 처리한다(아래 참가자 목록 로드 effect 참고).
+  const didInitialFetchRef = useRef(false);
+  // 전체 교체(재조회) 중 PLAYER_JOINED/PLAYER_LEFT/PLAYER_ELIMINATED가 도착했는지 추적한다
+  // (코드 리뷰 반영) — fetch가 진행되는 사이 delta가 먼저 반영된 뒤 뒤늦게 도착한 stale
+  // 스냅샷이 그 상태를 덮어쓰는 레이스를 막기 위함. 최초 마운트의 병합 경로는 이 레이스에
+  // 안전하므로(union만 하고 제거는 하지 않음) 대상이 아니다 — 전체 교체 분기에서만 사용한다.
+  const playersSnapshotStaleRef = useRef(false);
   const [startError, setStartError] = useState<string | null>(null);
   const [isStarting, setIsStarting] = useState(false);
 
@@ -130,6 +143,7 @@ export default function GameAdminPage() {
   // GAME_ENDED로 갱신하므로 별도의 winner state를 두지 않는다.
   const { status, phaseNumber, transitionTo, transitionAt, winner } = useGamePhase({
     roomId: adminCtx?.roomId ?? "",
+    recoveryKey,
     onReset: () => {
       setPlayers((prev) => prev.map((player) => ({ ...player, isAlive: true, role: null })));
       setTally({});
@@ -147,7 +161,7 @@ export default function GameAdminPage() {
 
   // 접속 상태(F020) — 참가자들이 자기 화면(대기실/게임)에서 track한 Realtime Presence를
   // 진행자는 읽기만 한다(진행자는 참가자 레코드가 없으므로 selfPlayerId 미전달로 track하지 않음).
-  const onlineIds = useGamePresence(adminCtx?.roomId ?? null);
+  const onlineIds = useGamePresence(adminCtx?.roomId ?? null, undefined, recoveryKey);
 
   // 밤 결과 처리는 phase당 한 번만 허용하는 클라 가드다 — 새 밤이 시작(PHASE_CHANGED로
   // status가 night으로 바뀜)되면 다음 밤을 다시 처리할 수 있도록 초기화한다.
@@ -184,30 +198,54 @@ export default function GameAdminPage() {
     }
   }, [ctxChecked, adminCtx, router]);
 
-  // 초기 참가자 목록 로드
+  // 초기 참가자 목록 로드 — broadcast로 먼저 들어온 참가자를 덮어쓰지 않도록 병합한다.
+  // 단, 네트워크 복구로 인한 재조회(recoveryKey 변경)는 서버 목록을 그대로 신뢰해야 한다 —
+  // 이탈 중 놓친 PLAYER_LEFT(퇴장/강퇴)까지 정확히 반영하려면 병합이 아닌 전체 교체가 필요하다.
+  // 전체 교체 분기는 fetch 진행 중 도착한 delta(playersSnapshotStaleRef)가 있으면 stale
+  // 스냅샷을 적용하지 않고 1회 재조회한다(재시도는 무한 루프 방지를 위해 최대 1회).
   useEffect(() => {
     if (!adminCtx) return;
 
     let cancelled = false;
-    getRoomPlayers(adminCtx.roomId)
-      .then((initialPlayers) => {
-        if (cancelled) return;
-        const mapped = initialPlayers.map((p) => toGamePlayer(p, adminCtx.roomId));
-        // broadcast로 먼저 들어온 참가자를 덮어쓰지 않도록 병합한다.
-        setPlayers((prev) => {
-          const byId = new Map(prev.map((p) => [p.id, p]));
-          mapped.forEach((p) => byId.set(p.id, p));
-          return Array.from(byId.values());
+    let retried = false;
+    const isRecoveryRefetch = didInitialFetchRef.current;
+    if (isRecoveryRefetch) {
+      playersSnapshotStaleRef.current = false;
+    }
+
+    const load = () => {
+      getRoomPlayers(adminCtx.roomId)
+        .then((initialPlayers) => {
+          if (cancelled) return;
+          const mapped = initialPlayers.map((p) => toGamePlayer(p, adminCtx.roomId));
+          if (isRecoveryRefetch) {
+            if (playersSnapshotStaleRef.current && !retried) {
+              retried = true;
+              playersSnapshotStaleRef.current = false;
+              load();
+              return;
+            }
+            playersSnapshotStaleRef.current = false;
+            setPlayers(mapped);
+          } else {
+            setPlayers((prev) => {
+              const byId = new Map(prev.map((p) => [p.id, p]));
+              mapped.forEach((p) => byId.set(p.id, p));
+              return Array.from(byId.values());
+            });
+          }
+          didInitialFetchRef.current = true;
+        })
+        .catch(() => {
+          if (!cancelled) setStartError("참가자 목록을 불러오지 못했습니다");
         });
-      })
-      .catch(() => {
-        if (!cancelled) setStartError("참가자 목록을 불러오지 못했습니다");
-      });
+    };
+    load();
 
     return () => {
       cancelled = true;
     };
-  }, [adminCtx]);
+  }, [adminCtx, recoveryKey]);
 
   // 밤 행동 완료 현황을 다시 불러온다(PIN 게이트) — 초기 로드 및 NIGHT_ACTION_UPDATE 수신 시 호출한다.
   const loadNightStatus = useCallback(async () => {
@@ -223,7 +261,7 @@ export default function GameAdminPage() {
 
   useEffect(() => {
     void loadNightStatus();
-  }, [loadNightStatus]);
+  }, [loadNightStatus, recoveryKey]);
 
   // 실시간 구독 — 새 참가자 입장 (대기실과 동일한 공개 채널/이벤트)
   useEffect(() => {
@@ -233,6 +271,7 @@ export default function GameAdminPage() {
     const channel = supabase
       .channel(roomChannel(adminCtx.roomId))
       .on("broadcast", { event: GAME_EVENTS.PLAYER_JOINED }, ({ payload }) => {
+        playersSnapshotStaleRef.current = true;
         const joined = payload as PlayerJoinedPayload;
         setPlayers((prev) => {
           if (prev.some((p) => p.id === joined.id)) return prev;
@@ -242,6 +281,7 @@ export default function GameAdminPage() {
       .on("broadcast", { event: GAME_EVENTS.PLAYER_LEFT }, ({ payload }) => {
         // 참가자가 대기실에서 나가면(자발적 퇴장/강퇴) 목록에서 제거한다.
         // 접속 상태는 Realtime Presence(useGamePresence)가 자동 반영하므로 여기서 다루지 않는다.
+        playersSnapshotStaleRef.current = true;
         const { playerId } = payload as PlayerLeftPayload;
         setPlayers((prev) => prev.filter((p) => p.id !== playerId));
       })
@@ -251,6 +291,7 @@ export default function GameAdminPage() {
         setVoterCount(update.voterCount);
       })
       .on("broadcast", { event: GAME_EVENTS.PLAYER_ELIMINATED }, ({ payload }) => {
+        playersSnapshotStaleRef.current = true;
         const { playerId } = payload as PlayerEliminatedPayload;
         setPlayers((prev) =>
           prev.map((p) => (p.id === playerId ? { ...p, isAlive: false } : p)),
@@ -266,7 +307,7 @@ export default function GameAdminPage() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [adminCtx, loadNightStatus]);
+  }, [adminCtx, loadNightStatus, recoveryKey]);
 
   const aliveCount = players.filter((player) => player.isAlive).length;
   const voteProgress = aliveCount > 0 ? (voterCount / aliveCount) * 100 : 0;
@@ -495,9 +536,15 @@ export default function GameAdminPage() {
       )}
 
       <Tabs defaultValue="screen">
-        <TabsList>
-          <TabsTrigger value="screen">스크린</TabsTrigger>
-          <TabsTrigger value="control">제어</TabsTrigger>
+        {/* 탭 트리거 터치 영역 확보(Task 015) — group-data-* 변형까지 동일하게 지정해야
+            shadcn 기본 h-9(36px)를 44px로 안전하게 덮어쓴다. */}
+        <TabsList className="group-data-[orientation=horizontal]/tabs:h-11">
+          <TabsTrigger value="screen" className="min-h-11">
+            스크린
+          </TabsTrigger>
+          <TabsTrigger value="control" className="min-h-11">
+            제어
+          </TabsTrigger>
         </TabsList>
 
         {/* 스크린 탭 — 참가자도 함께 보는 공개 화면(빔프로젝터). 역할 노출 금지 */}
@@ -579,6 +626,7 @@ export default function GameAdminPage() {
                           type="button"
                           size="sm"
                           variant="outline"
+                          className="min-h-11"
                           disabled={
                             !player.isAlive ||
                             isEliminating === player.id ||
@@ -592,6 +640,7 @@ export default function GameAdminPage() {
                           type="button"
                           size="sm"
                           variant="destructive"
+                          className="min-h-11"
                           disabled={
                             isKicking === player.id ||
                             status === "ended" ||
@@ -622,6 +671,7 @@ export default function GameAdminPage() {
               <Button
                 type="button"
                 size="lg"
+                className="min-h-11"
                 onClick={() => void handleStartGame()}
                 disabled={isStarting}
               >
@@ -644,6 +694,7 @@ export default function GameAdminPage() {
               <div className="flex flex-wrap items-center gap-2">
                 <Button
                   type="button"
+                  className="min-h-11"
                   onClick={() => void handleRequestTransition()}
                   disabled={!!transitionTo || isTransitioning || winner !== null}
                 >
@@ -655,6 +706,7 @@ export default function GameAdminPage() {
                     <Button
                       type="button"
                       variant="outline"
+                      className="min-h-11"
                       onClick={() => void handleCancelTransition()}
                     >
                       전환 취소
@@ -676,6 +728,7 @@ export default function GameAdminPage() {
             <div className="flex flex-wrap gap-2">
               <Button
                 type="button"
+                className="min-h-11"
                 onClick={() => void handleCloseVoting()}
                 disabled={isClosingVote || winner !== null}
               >
@@ -684,6 +737,7 @@ export default function GameAdminPage() {
               <Button
                 type="button"
                 variant="outline"
+                className="min-h-11"
                 onClick={() => void handleCloseVoting()}
                 disabled={isClosingVote || !canCloseEarly || winner !== null}
               >
@@ -715,6 +769,7 @@ export default function GameAdminPage() {
             )}
             <Button
               type="button"
+              className="min-h-11"
               onClick={() => void handleResolveNight()}
               disabled={isResolvingNight || winner !== null || nightResolved}
             >
@@ -730,11 +785,17 @@ export default function GameAdminPage() {
             <span className="text-sm font-medium text-muted-foreground">시스템 메시지</span>
             <div className="flex gap-2">
               <Input
+                className="min-h-11"
                 value={systemMessage}
                 onChange={(event) => setSystemMessage(event.target.value)}
                 placeholder="전체 참가자에게 보낼 메시지를 입력하세요"
               />
-              <Button type="button" disabled title="이후 태스크에서 Server Action으로 구현 예정">
+              <Button
+                type="button"
+                className="min-h-11"
+                disabled
+                title="이후 태스크에서 Server Action으로 구현 예정"
+              >
                 전송
               </Button>
             </div>
@@ -746,6 +807,7 @@ export default function GameAdminPage() {
               <Button
                 type="button"
                 variant="destructive"
+                className="min-h-11"
                 disabled
                 title="승리 조건 충족 시 자동으로 종료됩니다"
               >
@@ -754,6 +816,7 @@ export default function GameAdminPage() {
               <Button
                 type="button"
                 variant="destructive"
+                className="min-h-11"
                 onClick={handleResetGame}
                 disabled={isResetting}
               >
@@ -777,7 +840,7 @@ export default function GameAdminPage() {
                 key={candidate.id}
                 type="button"
                 variant="outline"
-                className="justify-between"
+                className="min-h-11 justify-between"
                 onClick={() => void handleResolveTie(candidate.id)}
                 disabled={isClosingVote}
               >
