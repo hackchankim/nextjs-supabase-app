@@ -503,12 +503,23 @@
   - [x] 오프라인 중 놓친 변경(SQL 직접 INSERT·본인 강퇴)이 online 복귀 시 스냅샷 재조회로 복원되는가
   - [x] 무차별 UI 회귀 없음 (이단 대장 vs 목사님 화면 구조 동일 — 정식 검증은 Task 017)
 
-- **Task 016: 배포 및 운영 준비**
-  - Vercel 배포 설정 및 환경 변수 구성
-  - 게임 세션 만료 처리 (24시간 후 자동 리셋)
-  - 진행자 화면에서 QR코드 생성 기능 (참가자 초대용)
-  - 게임 시작 전 역할 배분 미리보기 (진행자만 확인)
-  - README에 행사 진행 가이드 추가
+- **Task 016: 배포 및 운영 준비** ✅ - 완료 (auto-dev · 브랜치 auto/deploy-ops-prep)
+  - ✅ **세션 만료 처리(24시간)** — `getOrCreateActiveRoom`(`lib/game/actions.ts`)이 `status==='waiting'`이고 `created_at`이 `SESSION_EXPIRY_MS`(24h) 넘게 지난 방을 발견하면 참가자 목록을 정리한다. **재실행(무한 루프) 방지**: `created_at`을 지금 시각으로 먼저 UPDATE해 만료 조건을 해제한 뒤에만 `game_players`를 DELETE — created_at 갱신이 실패하면 아무 것도 지우지 않고 기존 방을 그대로 반환(다음 요청에서 재시도), 삭제만 실패해도 재실행 루프는 이미 막혀 있어 무해. **day/night 진행 중인 방은 절대 건드리지 않음**(`game_votes`/`game_night_actions`/`game_messages`는 waiting 상태엔 구조적으로 존재할 수 없어 지울 것이 없다는 점에 착안해 범위를 좁힘). **PIN은 재발급하지 않고 유지**(같은 진행자가 다음 행사에도 같은 PIN 사용 가능, 재발급 시 새 PIN을 알릴 방법이 없어 진행자가 스스로 잠기는 위험 제거).
+  - ✅ **진행자 대시보드 QR코드** — `qrcode` 패키지(순수 로컬 렌더링, 네트워크 호출 없음) 도입. `status==='waiting'`일 때 [제어] 탭 최상단에 참가 URL(`{origin}/game`)을 인코딩한 QR + URL 텍스트 표시.
+  - ✅ **역할 배분 미리보기** — 신규 Server Action 없이 기존 `getRoleDistribution`(`lib/game/utils.ts`, 순수 함수) 재사용. `canStartGame`일 때 [게임 시작] 버튼 위에 "예상 배분 — 이단 N명 · 이단 대장 1명 · ..." 문구 표시, 인원 미달 시 미노출.
+  - ✅ **README 행사 진행 가이드** — URL/QR 공유, 인원 범위(5~20명), PIN 안내, 24시간 세션 정리 동작(대기 상태 전용·PIN 불변·진행 중 게임 무영향) 명시.
+  - ✅ **`docs/deployment.md` 신규** — Vercel 대시보드 리포지토리 연결 → 환경변수(`NEXT_PUBLIC_SUPABASE_URL`/`NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`/`SUPABASE_SERVICE_ROLE_KEY`) 설정 → Deploy 단계별 절차. **실제 배포(계정 연결·대시보드 조작)는 수행하지 않음** — Vercel 계정 접근이 필요해 자율 에이전트가 대신할 수 없는 영역이라 절차 문서화로 대체, 실제 배포는 사람이 수행.
+  - ⚠️ **code-reviewer 1차 리뷰에서 설계 축소**: 최초 구현은 votes/night_actions/messages까지 삭제 + room 전체 UPDATE + PIN 재발급까지 하는 5단계 비원자적 처리였으나, ①부분 실패 시 반환값-DB 불일치로 신규 참가가 영구 차단될 수 있는 치명적 결함 ②day/night 진행 중 게임까지 만료 판정되어 삭제될 위험 ③PIN 재발급으로 정당한 진행자가 스스로 잠길 위험 ④동시 요청 시 PIN 경쟁 상태, 4건이 지적되어 위 최종 설계(대기 상태 전용·PIN 불변·participants만 삭제·created_at 선-갱신)로 전면 재작업.
+
+  ### 테스트 체크리스트 (qa-tester 8개 중 7 PASS, 1 FAIL→README 정정 후 해결)
+  - [x] 24h 초과 대기실에 재접속 시 기존 참가자가 정리되고, `created_at` 갱신으로 재실행 루프가 발생하지 않는가 _(연속 2회 입장 실증 — 첫 참가자가 두 번째 입장으로 지워지지 않음)_
+  - [x] day/night 진행 중인 방은 24h 초과해도 참가자·투표·메시지가 삭제되지 않는가
+  - [x] 만료 리셋 후에도 기존 PIN으로 진행자 대시보드 진입이 되는가(PIN 불변)
+  - [x] 대기실 상태에서 QR코드·URL이 정상 렌더(실제 이미지 로드)되는가
+  - [x] 최소 인원 충족 시 예상 역할 배분 문구가 표시되고 미달 시 숨겨지는가
+  - [x] README/docs/deployment.md 문서가 실제 동작과 정확히 일치하는가 _(초기 README가 "PIN 재발급"으로 잘못 서술 → 정정 완료)_
+  - [x] 콘솔 에러 0건
+  - [x] 기존 입장·게임 시작·강퇴·리셋 시나리오 회귀 없음
 
 - **Task 017: 역할 무차별 UI 정합성 검증**
   - 게임 플레이 페이지에서 서로 다른 역할(이단 대장·이단·목사님·장로님·권사님·성도)로 동시 접속
