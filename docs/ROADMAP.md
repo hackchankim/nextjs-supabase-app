@@ -1,6 +1,6 @@
 # 교회 테마 마피아 게임 개발 로드맵
 
-모바일 브라우저 하나로 10-20명이 즉시 참여하는 교회 버전 실시간 마피아 게임
+모바일 브라우저 하나로 5-20명이 즉시 참여하는 교회 버전 실시간 마피아 게임
 
 ## 개요
 
@@ -272,6 +272,26 @@
   - [x] 진행자만 [게임 시작] 버튼이 보이는가 _(진행자 대시보드에서만, 시작 후 버튼 잠금)_
   - [x] role/session_token이 클라이언트로 노출되지 않는가 _(getRoomPlayers 응답·broadcast 프레임 실측)_
 
+- **Task 009-1: 최소 참가 인원 5명으로 하향** ✅ - 완료 (auto-dev · 브랜치 auto/min-players-5)
+  - ✅ 배경: 기존 `MIN_PLAYERS=10`이라 10명 미만이면 게임 시작이 불가능했음. 소규모 모임(5~9명) 지원을 위해 5로 하향.
+  - ✅ `lib/game/constants.ts`: `MIN_PLAYERS = 10` → `MIN_PLAYERS = 5`로 변경(주석 "지원 인원 범위 (10~20명)"도 "(5~20명)"으로 갱신). 문서용(코드에서 미사용) `ROLE_DISTRIBUTION_TABLE` 상수에 `5: { heretic: 1, heretic_leader: 1, pastor: 1, elder: 1, deaconess: 1, saint: 0 }` 대표 항목 추가.
+  - ✅ `lib/game/actions.ts`의 `startGame`: 하드코딩된 에러 메시지 `"게임 시작에는 최소 10명이 필요합니다"`를 `` `게임 시작에는 최소 ${MIN_PLAYERS}명이 필요합니다` `` 템플릿 리터럴로 교체(`joinGame`의 `MAX_PLAYERS` 에러 메시지 패턴과 동일하게 상수와 동기화).
+  - ✅ `lib/game/utils.ts`의 `getRoleDistribution` 공식(`heretic=floor(n/5)`, 이단대장·목사님·권사님 각 1, 장로님 n<13?1:2, 나머지 성도)은 **수정하지 않음** — `MIN_PLAYERS`/`MAX_PLAYERS` 상수를 그대로 참조해 클램프하므로, 상수만 바뀌어 5~9명에 자동으로 올바르게 일반화됨(qa-tester가 5·10명 SQL 배분 결과로 실증). JSDoc 주석("10~20명"·"대표점 10/15/20")도 실제 지원 범위와 동기화(code-reviewer 지적 반영).
+  - ✅ `app/game/admin/page.tsx`(`canStartGame` 조건, 인원 표시 문구)와 `app/game/waiting/page.tsx`(인원 표시 문구)는 이미 `MIN_PLAYERS` 상수를 참조해 코드 수정 없이 자동 반영됨.
+  - ✅ `docs/PRD.md`의 "10-20명" 표기는 "5-20명"으로 반영됨(선행 완료).
+  - ✅ DB 스키마 변경 없음(`MIN_PLAYERS`는 앱 상수일 뿐 DB에 저장되지 않음).
+  - 📝 **참고(설계 특성, 결함 아님)**: 5명 구성(이단 팀 2명 vs 선 팀 3명)은 선 팀이 1명만 잘못 처형돼도 즉시 이단 팀 승리 조건(`aliveHeretics >= aliveSaints`)이 충족될 만큼 타이트함 — 소규모 게임의 자연스러운 산술적 귀결이며 실제 플레이로 밸런스 체감 확인 권장.
+  - 📝 **범위 밖 발견(회귀 아님, 백로그)**: 진행자 대시보드 [제어] 탭의 참가자 표에서 "역할" 컬럼이 게임 시작 후에도 항상 "-"로 표시됨(`getRoomPlayers`가 role을 반환하지 않음) — 코드 주석은 "제어 탭은 역할 공개가 스펙상 정상"이라 명시하나 실제로는 F013(진행자 전용 제어판) 스펙과 어긋남. 이번 브랜치에서 발생한 회귀 아님(qa-tester 확인), 별도 이슈로 다룰 것.
+
+  ### 테스트 체크리스트 (qa-tester 7/7 PASS)
+  - [x] 참가자 5명으로 진행자 대시보드에 [게임 시작] 버튼이 노출되고 정상 시작되는가 _(실브라우저: 5번째 참가자 입장 → 시작 → day 전환 실증)_
+  - [x] 참가자 4명으로는 여전히 게임 시작이 거부되고 에러 메시지에 "최소 5명"이 표시되는가 _(버튼 미노출 + `startGame` 직접 호출로 에러 메시지 확인)_
+  - [x] 5~9명 각각 역할 배분 시 총원이 실제 인원수와 정확히 일치하고, 이단 대장·목사님·권사님이 각 1명씩 존재하는가 _(5명 SQL 배분 결과 기대값과 정확히 일치)_
+  - [x] 5명 구성(성도 0명)에서도 낮 투표·밤 행동·승리 판정이 정상 동작하는가 _(낮 투표→밤 전환→목사님 조사(이단 정확 판정)→밤 결과 처리→낮 전환까지 에러 없이 완주)_
+  - [x] 대기실·진행자 대시보드의 "최소 N명" 안내 문구가 5로 올바르게 표시되는가
+  - [x] 기존 10명 이상 시나리오에 회귀가 없는가 _(더미 10명 SQL 배분 결과 이단2·이단대장1·목사님1·장로님1·권사님1·성도4로 기존과 동일)_
+  - [x] 콘솔 에러 0건
+
 - **Task 010: 채팅 시스템 구현** ✅ - 완료 (auto-dev · Broadcast fan-out)
   - ✅ **⚠️ 아키텍처 — 채널 격리는 RLS+Postgres Changes가 아니라 Broadcast 개인 인박스 fan-out**: Task 009에서 확립된 원칙(Postgres Changes는 비밀 컬럼 전체 행 누출) 적용. `game_messages`는 anon 완전 차단(RLS: public/system SELECT만, 쓰기 정책 없음), 모든 읽기/쓰기는 service_role Server Action 경유. 비밀 채널은 서버가 **자격자 개인 인박스 토픽으로만** broadcast해 격리
   - ✅ `lib/game/inbox.ts` — `computeInboxToken(playerId)=HMAC-SHA256(BROADCAST_INBOX_SECRET, playerId)`(server-only). playerId는 공개지만 토픽은 역산 불가 → 타인 인박스 구독 차단. 인박스 채널: `room:{roomId}:inbox:{token}`
@@ -483,12 +503,23 @@
   - [x] 오프라인 중 놓친 변경(SQL 직접 INSERT·본인 강퇴)이 online 복귀 시 스냅샷 재조회로 복원되는가
   - [x] 무차별 UI 회귀 없음 (이단 대장 vs 목사님 화면 구조 동일 — 정식 검증은 Task 017)
 
-- **Task 016: 배포 및 운영 준비**
-  - Vercel 배포 설정 및 환경 변수 구성
-  - 게임 세션 만료 처리 (24시간 후 자동 리셋)
-  - 진행자 화면에서 QR코드 생성 기능 (참가자 초대용)
-  - 게임 시작 전 역할 배분 미리보기 (진행자만 확인)
-  - README에 행사 진행 가이드 추가
+- **Task 016: 배포 및 운영 준비** ✅ - 완료 (auto-dev · 브랜치 auto/deploy-ops-prep)
+  - ✅ **세션 만료 처리(24시간)** — `getOrCreateActiveRoom`(`lib/game/actions.ts`)이 `status==='waiting'`이고 `created_at`이 `SESSION_EXPIRY_MS`(24h) 넘게 지난 방을 발견하면 참가자 목록을 정리한다. **재실행(무한 루프) 방지**: `created_at`을 지금 시각으로 먼저 UPDATE해 만료 조건을 해제한 뒤에만 `game_players`를 DELETE — created_at 갱신이 실패하면 아무 것도 지우지 않고 기존 방을 그대로 반환(다음 요청에서 재시도), 삭제만 실패해도 재실행 루프는 이미 막혀 있어 무해. **day/night 진행 중인 방은 절대 건드리지 않음**(`game_votes`/`game_night_actions`/`game_messages`는 waiting 상태엔 구조적으로 존재할 수 없어 지울 것이 없다는 점에 착안해 범위를 좁힘). **PIN은 재발급하지 않고 유지**(같은 진행자가 다음 행사에도 같은 PIN 사용 가능, 재발급 시 새 PIN을 알릴 방법이 없어 진행자가 스스로 잠기는 위험 제거).
+  - ✅ **진행자 대시보드 QR코드** — `qrcode` 패키지(순수 로컬 렌더링, 네트워크 호출 없음) 도입. `status==='waiting'`일 때 [제어] 탭 최상단에 참가 URL(`{origin}/game`)을 인코딩한 QR + URL 텍스트 표시.
+  - ✅ **역할 배분 미리보기** — 신규 Server Action 없이 기존 `getRoleDistribution`(`lib/game/utils.ts`, 순수 함수) 재사용. `canStartGame`일 때 [게임 시작] 버튼 위에 "예상 배분 — 이단 N명 · 이단 대장 1명 · ..." 문구 표시, 인원 미달 시 미노출.
+  - ✅ **README 행사 진행 가이드** — URL/QR 공유, 인원 범위(5~20명), PIN 안내, 24시간 세션 정리 동작(대기 상태 전용·PIN 불변·진행 중 게임 무영향) 명시.
+  - ✅ **`docs/deployment.md` 신규** — Vercel 대시보드 리포지토리 연결 → 환경변수(`NEXT_PUBLIC_SUPABASE_URL`/`NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`/`SUPABASE_SERVICE_ROLE_KEY`) 설정 → Deploy 단계별 절차. **실제 배포(계정 연결·대시보드 조작)는 수행하지 않음** — Vercel 계정 접근이 필요해 자율 에이전트가 대신할 수 없는 영역이라 절차 문서화로 대체, 실제 배포는 사람이 수행.
+  - ⚠️ **code-reviewer 1차 리뷰에서 설계 축소**: 최초 구현은 votes/night_actions/messages까지 삭제 + room 전체 UPDATE + PIN 재발급까지 하는 5단계 비원자적 처리였으나, ①부분 실패 시 반환값-DB 불일치로 신규 참가가 영구 차단될 수 있는 치명적 결함 ②day/night 진행 중 게임까지 만료 판정되어 삭제될 위험 ③PIN 재발급으로 정당한 진행자가 스스로 잠길 위험 ④동시 요청 시 PIN 경쟁 상태, 4건이 지적되어 위 최종 설계(대기 상태 전용·PIN 불변·participants만 삭제·created_at 선-갱신)로 전면 재작업.
+
+  ### 테스트 체크리스트 (qa-tester 8개 중 7 PASS, 1 FAIL→README 정정 후 해결)
+  - [x] 24h 초과 대기실에 재접속 시 기존 참가자가 정리되고, `created_at` 갱신으로 재실행 루프가 발생하지 않는가 _(연속 2회 입장 실증 — 첫 참가자가 두 번째 입장으로 지워지지 않음)_
+  - [x] day/night 진행 중인 방은 24h 초과해도 참가자·투표·메시지가 삭제되지 않는가
+  - [x] 만료 리셋 후에도 기존 PIN으로 진행자 대시보드 진입이 되는가(PIN 불변)
+  - [x] 대기실 상태에서 QR코드·URL이 정상 렌더(실제 이미지 로드)되는가
+  - [x] 최소 인원 충족 시 예상 역할 배분 문구가 표시되고 미달 시 숨겨지는가
+  - [x] README/docs/deployment.md 문서가 실제 동작과 정확히 일치하는가 _(초기 README가 "PIN 재발급"으로 잘못 서술 → 정정 완료)_
+  - [x] 콘솔 에러 0건
+  - [x] 기존 입장·게임 시작·강퇴·리셋 시나리오 회귀 없음
 
 - **Task 017: 역할 무차별 UI 정합성 검증**
   - 게임 플레이 페이지에서 서로 다른 역할(이단 대장·이단·목사님·장로님·권사님·성도)로 동시 접속

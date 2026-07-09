@@ -22,7 +22,12 @@ import {
   isCouncil,
   isHeretic,
 } from "@/lib/game/utils";
-import { MIN_PLAYERS, MAX_PLAYERS, NIGHT_ACTION_ROLES } from "@/lib/game/constants";
+import {
+  MIN_PLAYERS,
+  MAX_PLAYERS,
+  NIGHT_ACTION_ROLES,
+  SESSION_EXPIRY_MS,
+} from "@/lib/game/constants";
 import type { ActionType, ChatChannel, GameStatus, PlayerRole, Winner } from "@/lib/game/types";
 import type { GameRoomRow } from "@/lib/types/database.types";
 
@@ -63,6 +68,22 @@ function generateAdminPin(): string {
 /**
  * 진행 중(대기/낮/밤)인 게임 방을 조회하고, 없으면 새로 생성한다.
  * game_players/game_rooms 쓰기는 anon 정책이 없으므로 반드시 service_role로 수행한다.
+ *
+ * **24시간 만료 정리(대기 상태 전용)**: `status === "waiting"`인 방이 생성된 지
+ * `SESSION_EXPIRY_MS`(24시간)를 넘기면 이전 행사의 잔재로 간주하고 남은 참가자만 정리한다.
+ * day/night(진행 중)인 방은 절대 건드리지 않는다 — game_votes/game_night_actions/
+ * game_messages는 구조적으로 day/night로 넘어가야만 생기는 데이터이므로, waiting 상태에는
+ * 애초에 존재할 수 없어 지울 것이 없다. admin_pin도 재발급하지 않는다(같은 진행자가 다음
+ * 행사에도 같은 PIN을 계속 쓰는 것은 이 앱의 보안 모델상 문제가 없고, 재발급하면 새 PIN을
+ * 전달할 방법이 없어 정당한 진행자가 스스로 잠길 위험이 있다).
+ *
+ * 재실행(무한 루프) 방지가 핵심이다: 참가자만 지우고 `created_at`을 그대로 두면 다음 방문자가
+ * 들어올 때마다 여전히 "24시간 초과"로 판정되어 방금 들어온 참가자까지 계속 지워버린다.
+ * 그래서 반드시 (1) `created_at`을 지금 시각으로 UPDATE해 만료 조건을 먼저 해제하고,
+ * 그 UPDATE가 성공했을 때만 (2) `game_players`를 삭제한다. (1)이 실패하면 아무 것도 지우지
+ * 않고 기존 방을 그대로 반환한다(다음 요청에서 재시도됨). (2)가 실패해도 이미 (1)로 재실행
+ * 루프는 막혔으므로, 오래된 참가자 몇 명이 다음 방문 때까지 무해하게 남는 정도로 끝난다.
+ * 두 단계 모두 실패 시 콘솔에 에러를 로그로 남긴다.
  */
 async function getOrCreateActiveRoom(): Promise<GameRoomRow> {
   const supabase = createAdminClient();
@@ -80,7 +101,53 @@ async function getOrCreateActiveRoom(): Promise<GameRoomRow> {
   }
 
   if (existingRoom) {
-    return existingRoom;
+    const isExpiredWaitingRoom =
+      existingRoom.status === "waiting" &&
+      Date.now() - new Date(existingRoom.created_at).getTime() > SESSION_EXPIRY_MS;
+
+    if (!isExpiredWaitingRoom) {
+      return existingRoom;
+    }
+
+    // 1단계 — 재실행 방지를 위해 created_at을 먼저 지금 시각으로 갱신한다.
+    // 이 단계가 실패하면 참가자는 절대 건드리지 않고 기존 방을 그대로 반환한다.
+    const nowIso = new Date().toISOString();
+    try {
+      const { error: touchError } = await supabase
+        .from("game_rooms")
+        .update({ created_at: nowIso })
+        .eq("id", existingRoom.id);
+      if (touchError) {
+        throw new Error(`만료 세션 갱신 실패: ${touchError.message}`);
+      }
+    } catch (error) {
+      console.error(
+        "[getOrCreateActiveRoom] 만료 세션 created_at 갱신 실패 — 참가자 삭제를 건너뛰고 기존 방을 그대로 반환합니다",
+        error,
+      );
+      return existingRoom;
+    }
+
+    const touchedRoom: GameRoomRow = { ...existingRoom, created_at: nowIso };
+
+    // 2단계 — 재실행 루프는 이미 해제됐으므로, 여기서 실패해도 오래된 참가자가
+    // 다음 방문 때까지 무해하게 남는 정도로 끝난다(로그만 남기고 계속 진행).
+    try {
+      const { error: playersError } = await supabase
+        .from("game_players")
+        .delete()
+        .eq("room_id", existingRoom.id);
+      if (playersError) {
+        throw new Error(`만료 세션 참가자 삭제 실패: ${playersError.message}`);
+      }
+    } catch (error) {
+      console.error(
+        "[getOrCreateActiveRoom] 만료 세션 참가자 삭제 실패 — 다음 방문까지 잔존 참가자가 남을 수 있습니다",
+        error,
+      );
+    }
+
+    return touchedRoom;
   }
 
   const { data: newRoom, error: insertError } = await supabase
@@ -414,7 +481,7 @@ export async function startGame(roomId: string, pin: string): Promise<StartGameR
     const players = await getRoomPlayers(roomId);
 
     if (players.length < MIN_PLAYERS) {
-      return { ok: false, error: "게임 시작에는 최소 10명이 필요합니다" };
+      return { ok: false, error: `게임 시작에는 최소 ${MIN_PLAYERS}명이 필요합니다` };
     }
 
     const distribution = getRoleDistribution(players.length);
