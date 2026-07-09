@@ -9,8 +9,8 @@ import {
 } from "./constants";
 
 /**
- * 인원수 기반 역할 배분 계산 (10~20명).
- * 대표점(10/15/20)과 일치: heretic=floor(n/5), 이단대장·목사님·권사님 각 1,
+ * 인원수 기반 역할 배분 계산 (5~20명).
+ * 대표점(5/10/15/20)과 일치: heretic=floor(n/5), 이단대장·목사님·권사님 각 1,
  * 장로님 n<13 ? 1 : 2, 나머지는 성도.
  */
 export function getRoleDistribution(playerCount: number): RoleDistribution {

@@ -44,12 +44,13 @@ export const WINNER_LABELS: Record<Winner, string> = {
   heretics: "이단 팀 승리!",
 };
 
-/** 지원 인원 범위 (10~20명) */
-export const MIN_PLAYERS = 10;
+/** 지원 인원 범위 (5~20명) */
+export const MIN_PLAYERS = 5;
 export const MAX_PLAYERS = 20;
 
 /** 인원별 역할 배분표 (대표 인원수) — 그 외 인원은 getRoleDistribution()이 계산 */
 export const ROLE_DISTRIBUTION_TABLE: Record<number, RoleDistribution> = {
+  5: { heretic: 1, heretic_leader: 1, pastor: 1, elder: 1, deaconess: 1, saint: 0 },
   10: { heretic: 2, heretic_leader: 1, pastor: 1, elder: 1, deaconess: 1, saint: 4 },
   15: { heretic: 3, heretic_leader: 1, pastor: 1, elder: 2, deaconess: 1, saint: 7 },
   20: { heretic: 4, heretic_leader: 1, pastor: 1, elder: 2, deaconess: 1, saint: 11 },

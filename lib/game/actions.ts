@@ -414,7 +414,7 @@ export async function startGame(roomId: string, pin: string): Promise<StartGameR
     const players = await getRoomPlayers(roomId);
 
     if (players.length < MIN_PLAYERS) {
-      return { ok: false, error: "게임 시작에는 최소 10명이 필요합니다" };
+      return { ok: false, error: `게임 시작에는 최소 ${MIN_PLAYERS}명이 필요합니다` };
     }
 
     const distribution = getRoleDistribution(players.length);
