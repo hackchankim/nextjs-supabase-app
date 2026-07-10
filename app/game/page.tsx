@@ -25,17 +25,27 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { joinGame, verifyAdminPin } from "@/lib/game/actions";
 import { useGameSession } from "@/lib/game/hooks/useGameSession";
+import {
+  isKakaoInAppBrowser,
+  useKakaoInAppRedirect,
+} from "@/lib/game/hooks/useKakaoInAppRedirect";
 
-// 입장 허브 (F001 닉네임 입장 · F002 진행자 PIN 입장)
+// 입장 허브 (F001 닉네임 입장 · F002 진행자 PIN 입장 · F022 카카오톡 인앱 브라우저 자동 전환)
 export default function GameEntryPage() {
   const router = useRouter();
+  // 화면 표시(입장 폼 vs 안내 문구)용 — 하이드레이션 안전하게 마운트 후에만 true로 바뀐다.
+  const isKakaoRedirecting = useKakaoInAppRedirect();
   const { player, loading, setSession } = useGameSession();
   const [isPending, startTransition] = useTransition();
 
   // 재접속 게이트 — 이미 유효한 참가자 세션이 있으면 닉네임을 다시 묻지 않고
   // 현재 게임 상태에 맞는 화면으로 자동 이동한다(이탈 후 복귀 시 막다른 길 제거).
+  // 카카오톡 인앱 브라우저 리다이렉트 판정은 반드시 isKakaoInAppBrowser()를 그 자리에서
+  // 직접 호출해 확인한다 — useKakaoInAppRedirect()의 state는 리마운트마다 초기화되므로
+  // (Server Action 응답 후 재렌더 등) 이 게이트를 그 값에 의존시키면 한 프레임 새에도
+  // router.replace가 먼저 커밋되는 경쟁 상태가 생긴다.
   useEffect(() => {
-    if (loading || !player) return;
+    if (isKakaoInAppBrowser() || loading || !player) return;
     router.replace(player.roomStatus === "waiting" ? "/game/waiting" : "/game/play");
   }, [loading, player, router]);
 
@@ -76,6 +86,13 @@ export default function GameEntryPage() {
       }
     });
   };
+
+  // 카카오톡 인앱 브라우저를 벗어나는 중에는 입장 폼 대신 안내만 보여준다.
+  if (isKakaoRedirecting) {
+    return (
+      <p className="text-muted-foreground text-sm">브라우저로 이동 중입니다...</p>
+    );
+  }
 
   // 세션 복원 중이거나 이미 세션이 있으면(위 게이트가 이동 처리) 입장 폼을 노출하지 않는다.
   if (loading || player) {
