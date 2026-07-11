@@ -55,6 +55,13 @@ const NIGHT_ONLY_CHANNELS: readonly ChatChannel[] = ["heretic", "council"];
 const NICKNAME_MIN_LENGTH = 1;
 const NICKNAME_MAX_LENGTH = 20;
 
+/**
+ * 채널별 스냅샷으로 불러오는 최대 메시지 수 — 마운트·재접속 시 채널 전체 이력을 매번 끌어오지
+ * 않고 최신 N건만 조회해 응답 크기·시간을 제한한다(채팅은 표시 전용이며 이후 메시지는 Broadcast로
+ * 실시간 수신되므로 과거 일부만 로드해도 기능상 문제 없음).
+ */
+const MESSAGE_HISTORY_LIMIT = 200;
+
 /** 진행자 PIN 자릿수 */
 const ADMIN_PIN_LENGTH = 4;
 
@@ -899,11 +906,17 @@ export async function getMessages(
       : query.or(`player_id.eq.${sender.id},recipient_id.eq.${sender.id}`);
   }
 
-  const { data: rows, error } = await query.order("created_at", { ascending: true });
+  // 최신 N건만 조회한다(created_at 내림차순 + limit) — 이후 오래→최신 순으로 되돌려
+  // 렌더 순서를 유지한다. 채널 이력이 길어져도 스냅샷 크기가 MESSAGE_HISTORY_LIMIT로 고정된다.
+  const { data: recentRows, error } = await query
+    .order("created_at", { ascending: false })
+    .limit(MESSAGE_HISTORY_LIMIT);
 
-  if (error || !rows || rows.length === 0) {
+  if (error || !recentRows || recentRows.length === 0) {
     return [];
   }
+
+  const rows = recentRows.slice().reverse();
 
   const senderIds = Array.from(
     new Set(rows.map((row) => row.player_id).filter((id): id is string => id !== null)),
