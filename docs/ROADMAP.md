@@ -485,7 +485,7 @@
 
 ---
 
-### Phase 4: 고급 기능 및 최적화 ✅
+### Phase 4: 고급 기능 및 최적화
 
 - **Task 015: 모바일 UX 최적화** ✅ - 완료 (auto-dev · 브랜치 auto/mobile-ux)
   - ✅ 터치 영역 최적화 — 게임 화면 주요 버튼·탭 트리거·투표/행동 대상에 `min-h-11`(44px) 적용, shadcn 전역 파일(components/ui/*)은 미수정. 390×844 실측 전 항목 ≥44px
@@ -554,3 +554,24 @@
   - [x] 유효 세션 + 카카오 UA로 접속 시 재접속 게이트가 `/game/waiting`으로 새지 않고 "브라우저로 이동 중입니다..." 상태를 유지하는가 _(`getPlayerBySession` 응답 인위 지연 3회 반복 재현, 새는 프레임 없음 확인)_
   - [x] 카카오 UA 접속 시 React hydration mismatch 콘솔 에러가 없는가 _(2차 QA에서 발견된 회귀, 3차 재설계로 해소 확인)_
   - [x] 일반 UA 콘솔 에러 0건
+
+- **Task 019: 관리자 패널 (PIN 관리 + 데이터 초기화)** - 우선순위
+  - 배경: 진행자보다 상위 운영자를 위한 도구 부재 — `admin_pin`은 방 생성 시 1회 정해지고 변경·조회 UI가 전무(자동 생성 PIN은 아무도 못 봄), 종료(ended)된 방이 영구 누적(삭제 로직 없음). 별도 관리자 시크릿으로 진입하는 관리자 패널로 해결. F023·F024 반영.
+  - **인증(F023)**: 진행자 PIN과 분리된 `ADMIN_SECRET` 환경변수(서버 전용). `lib/game/actions.ts`에 비공개 헬퍼 `isAdminSecretValid(secret)` — `process.env.ADMIN_SECRET`와 비교, **미설정 시 무조건 false**(fail-safe: 시크릿 미설정 시 관리자 기능 전체 잠금). 기존 `lib/game/inbox.ts`의 `process.env.BROADCAST_INBOX_SECRET` 판독이 선례. 시크릿은 DB·클라이언트·반환값 어디에도 노출 안 됨.
+  - **진입(F023)**: `app/game/page.tsx`(입장 허브)에 "진행자로 입장" 옆 "관리자로 입장" `Dialog`(시크릿은 `<Input type="password">`) 추가 → `verifyAdminSecret(secret)` 성공 시 `sessionStorage["game_admin_secret"]` 저장 → `/game/manage`로 이동. 기존 진행자 `game_admin_ctx` 패턴과 동일 신뢰 모델(탭 종료 시 소멸, 매 액션 서버 재검증).
+  - **관리자 패널 페이지(F024)**: 신규 `app/game/manage/page.tsx`(client) — 마운트 시 시크릿 없으면 `/game`로 리다이렉트. 섹션: 데이터 현황, 진행자 PIN 확인·변경, 현재 게임만 초기화, 전체 데이터 완전 삭제(강한 확인), 종료된 방 정리. sonner 토스트 피드백, 성공 시 현황 재조회, `min-h-11` 등 모바일 규칙 유지.
+  - **신규 Server Action(모두 `isAdminSecretValid` 게이트, `lib/game/actions.ts`)**: `verifyAdminSecret(secret)` / `getAdminOverview(secret)`(활성 방 status·adminPin·참가자 수·created_at + 전체 방 수·종료된 방 수·각 테이블 행 수) / `changeAdminPin(secret, newPin)`(4자리 숫자 검증 후 활성 방 admin_pin UPDATE) / `softResetActiveGame(secret)`(기존 `resetGame` 본문을 공유 헬퍼 `resetRoomToWaiting(supabase, roomId)`로 추출해 재사용 — 기록 삭제·참가자 유지) / `hardResetAllData(secret)`(game_rooms 전체 DELETE→자식 4테이블 CASCADE 정리→새 waiting 방 INSERT+새 PIN) / `purgeEndedRooms(secret)`(status='ended' 방 DELETE→CASCADE, 삭제 개수 반환).
+  - **admin_pin 노출은 관리자 게이트 뒤에서만**: `getAdminOverview`만 현재 PIN 반환(시크릿 검증 통과 후). 기존 `getRoomState`/`getRoomPlayers`의 admin_pin 미포함 원칙은 그대로 유지.
+  - **소프트 리셋 로직 공유 정당성**: 소프트 리셋은 기존 `resetGame`과 동작이 완전히 동일(기록 삭제·참가자 UPDATE 유지)하므로 헬퍼 공유가 옳음 — Task 016에서 지적된 "참가자 DELETE vs UPDATE로 의미가 다른" 만료-리셋과는 별개.
+  - **범위 밖(하지 않음)**: 미들웨어(`proxy.ts`)·루트 레이아웃 변경 없음, DB 스키마(신규 컬럼/테이블) 변경 없음(ADMIN_SECRET은 env), 진행자 PIN 게이트 액션 시그니처 변경 없음(resetGame은 본문만 헬퍼 추출·외부 동작 동일).
+  - **환경변수·문서**: `ADMIN_SECRET`을 `docs/deployment.md` 필요 환경변수 표에 추가(운영자만 아는 긴 문자열, `.env.local`·Vercel, 미설정 시 관리자 기능 잠금 명시).
+
+  ### 테스트 체크리스트
+  - [ ] ADMIN_SECRET 설정 후 입장 허브 "관리자로 입장" → 틀린 시크릿 거부, 맞는 시크릿 → /game/manage 진입. ADMIN_SECRET 미설정/빈 시크릿이면 전부 거부되고 페이지가 /game로 리다이렉트되는가
+  - [ ] 패널의 "현재 PIN"이 SQL의 game_rooms.admin_pin과 일치하는가
+  - [ ] PIN 변경 후 새 PIN으로 진행자 입장 성공·옛 PIN 거부, 4자리 아닌 입력 거부되는가
+  - [ ] 현재 게임만 초기화 시 votes/messages/night_actions 0행, 참가자 레코드 유지(role=null·is_alive=true), room status=waiting인가
+  - [ ] 전체 데이터 완전 삭제 시 정확히 새 waiting 방 1개+새 PIN, 자식 테이블 전부 0행인가
+  - [ ] 종료된 방 정리 시 ended 방·자식 CASCADE 삭제되고 활성 방은 무사, 삭제 개수 정확한가
+  - [ ] 데이터 현황 통계(방/종료방/각 테이블 행 수)가 SQL과 일치하는가
+  - [ ] lint/typecheck 통과, 콘솔 에러 없음, 관리자 액션 반환값에 시크릿·admin_pin이 의도 외로 새지 않는가
