@@ -23,7 +23,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { joinGame, verifyAdminPin } from "@/lib/game/actions";
+import { joinGame, verifyAdminPin, verifyAdminSecret } from "@/lib/game/actions";
 import { useGameSession } from "@/lib/game/hooks/useGameSession";
 import {
   isKakaoInAppBrowser,
@@ -57,6 +57,10 @@ export default function GameEntryPage() {
   const [pin, setPin] = useState("");
   const [pinError, setPinError] = useState<string | null>(null);
 
+  // 관리자 패널 입장(Task 019)용 입력 상태 — 진행자 PIN과 완전히 분리된 운영자 전용 시크릿.
+  const [adminSecret, setAdminSecret] = useState("");
+  const [adminError, setAdminError] = useState<string | null>(null);
+
   const handleJoin = () => {
     setNicknameError(null);
     startTransition(async () => {
@@ -83,6 +87,20 @@ export default function GameEntryPage() {
         router.push("/game/admin");
       } else {
         setPinError(result.error);
+      }
+    });
+  };
+
+  const handleVerifyAdmin = () => {
+    setAdminError(null);
+    startTransition(async () => {
+      const result = await verifyAdminSecret(adminSecret);
+      if (result.ok) {
+        // 관리자 패널은 진행자 PIN과 무관하게 이 시크릿만으로 인증한다.
+        window.sessionStorage.setItem("game_admin_secret", adminSecret);
+        router.push("/game/manage");
+      } else {
+        setAdminError(result.error);
       }
     });
   };
@@ -157,6 +175,38 @@ export default function GameEntryPage() {
           </div>
           <DialogFooter>
             <Button className="min-h-11 w-full" onClick={handleVerifyPin} disabled={isPending}>
+              확인
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog>
+        <DialogTrigger asChild>
+          <Button variant="ghost" className="min-h-11">
+            관리자로 입장
+          </Button>
+        </DialogTrigger>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>관리자 인증</DialogTitle>
+            <DialogDescription>
+              운영자 전용 시크릿을 입력하세요. 진행자 PIN과는 다른 값입니다.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-3 text-left">
+            <Label htmlFor="admin-secret">관리자 시크릿</Label>
+            <Input
+              id="admin-secret"
+              type="password"
+              placeholder="관리자 시크릿을 입력하세요"
+              value={adminSecret}
+              onChange={(event) => setAdminSecret(event.target.value)}
+            />
+            {adminError && <p className="text-destructive text-sm">{adminError}</p>}
+          </div>
+          <DialogFooter>
+            <Button className="min-h-11 w-full" onClick={handleVerifyAdmin} disabled={isPending}>
               확인
             </Button>
           </DialogFooter>

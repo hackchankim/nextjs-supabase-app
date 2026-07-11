@@ -11,6 +11,7 @@
   - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` (기존 anon 키도 동일하게 사용 가능)
   - `SUPABASE_SERVICE_ROLE_KEY` — 마피아 게임 로직(닉네임 입장·역할 배분·채팅 등)이 RLS를 우회하는 관리자 클라이언트(`lib/supabase/admin.ts`)를 사용하므로 **필수**입니다. 절대 `NEXT_PUBLIC_` 접두사를 붙이지 말고, 절대 저장소에 커밋하지 마세요.
 - (선택) `BROADCAST_INBOX_SECRET` — 게임 채팅의 개인 인박스(비밀 채널/1:1 귓속말) 채널명을 서명하는 시크릿입니다. 설정하지 않으면 `SUPABASE_SERVICE_ROLE_KEY`로 자동 폴백하므로 필수는 아니지만, 별도 시크릿으로 분리하고 싶다면 설정합니다.
+- `ADMIN_SECRET` — 관리자 패널(`/game/manage`) 인증용 운영자 전용 시크릿(운영자만 아는 긴 문자열)입니다. 진행자 4자리 PIN과는 완전히 별개이며, 진행자 PIN 재설정·전체 데이터 초기화 등 상위 관리 기능에 사용됩니다. `.env.local` 및 Vercel 환경변수에 설정하세요. **미설정 시 관리자 기능이 전부 잠깁니다(fail-safe)** — 값을 깜빡 설정하지 않아도 "누구나 통과"가 아니라 "아무도 통과 못 함"으로 안전하게 실패합니다. 전체 데이터 삭제까지 가능한 최상위 시크릿이므로 **최소 20자 이상의 무작위 문자열**(예: `openssl rand -base64 24`로 생성)을 사용하세요.
 
 `.env.local`에 이미 설정해 로컬에서 사용 중인 값과 **동일한 값**을 그대로 사용하면 됩니다.
 
@@ -39,6 +40,7 @@ Import 화면(또는 이후 **Project Settings → Environment Variables**)에�
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | `.env.local`의 값과 동일 | anon 키 또는 새 publishable 키 모두 가능 |
 | `SUPABASE_SERVICE_ROLE_KEY` | `.env.local`의 값과 동일 | 필수 — 누락 시 게임 입장/역할 배분 등 서버 액션이 모두 실패합니다 |
 | `BROADCAST_INBOX_SECRET` | (선택) `.env.local`의 값과 동일 | 미설정 시 `SUPABASE_SERVICE_ROLE_KEY`로 자동 폴백 |
+| `ADMIN_SECRET` | `.env.local`의 값과 동일 | 관리자 패널 전용 시크릿 — 미설정 시 관리자 기능이 전부 잠깁니다(fail-safe) |
 
 - **Environment**는 최소 `Production`에는 반드시 체크하고, 필요하면 `Preview`/`Development`에도 동일하게 체크합니다(PR 미리보기 배포에서도 게임이 정상 동작하려면 필요).
 - 값에 따옴표나 공백이 들어가지 않도록 주의합니다.
@@ -53,7 +55,9 @@ Import 화면(또는 이후 **Project Settings → Environment Variables**)에�
 
 - 발급된 URL로 접속해 `/game` 페이지에서 닉네임 입력 → 대기실 입장이 정상 동작하는지 확인합니다.
 - `/game/admin`에서 진행자 PIN 입력 후 대시보드가 정상적으로 열리는지 확인합니다.
+- `/game`에서 "관리자로 입장" → `ADMIN_SECRET` 입력 후 `/game/manage` 관리자 패널이 정상적으로 열리는지 확인합니다.
 - 문제가 있다면 Vercel 대시보드의 **Deployments → 해당 배포 → Runtime Logs**에서 서버 에러를 확인하거나, Supabase 대시보드의 **Logs** 메뉴에서 API/Postgres 로그를 확인합니다.
+- **관리자 패널 운영 주의**: 전체 데이터 완전 삭제·종료된 방 정리는 되돌릴 수 없으며, **진행 중인 게임이 있으면 접속자가 즉시 정리(입장 화면으로)된다** — 실행 전 데이터 현황에서 진행 중 방 여부를 확인할 것.
 
 ### 6. 환경 변수 변경 시
 

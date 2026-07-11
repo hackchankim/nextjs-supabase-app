@@ -554,3 +554,42 @@
   - [x] 유효 세션 + 카카오 UA로 접속 시 재접속 게이트가 `/game/waiting`으로 새지 않고 "브라우저로 이동 중입니다..." 상태를 유지하는가 _(`getPlayerBySession` 응답 인위 지연 3회 반복 재현, 새는 프레임 없음 확인)_
   - [x] 카카오 UA 접속 시 React hydration mismatch 콘솔 에러가 없는가 _(2차 QA에서 발견된 회귀, 3차 재설계로 해소 확인)_
   - [x] 일반 UA 콘솔 에러 0건
+
+- **Task 019: 관리자 패널 (PIN 관리 + 데이터 초기화)** ✅ - 완료 (auto-dev · 브랜치 auto/admin-panel)
+  - ✅ 배경: 진행자보다 상위 운영자를 위한 도구 부재 — `admin_pin`은 방 생성 시 1회 정해지고 변경·조회 UI가 전무(자동 생성 PIN은 아무도 못 봄), 종료(ended)된 방이 영구 누적(삭제 로직 없음). 별도 관리자 시크릿으로 진입하는 관리자 패널로 해결. F023·F024 반영.
+  - ✅ **인증(F023)**: 진행자 PIN과 분리된 `ADMIN_SECRET` 환경변수(서버 전용). `lib/game/actions.ts` 비공개 헬퍼 `isAdminSecretValid(secret)` — **미설정 시 무조건 false**(fail-safe) 먼저 체크 후, `crypto` `sha256`+`timingSafeEqual` **상수시간 비교**(타이밍 사이드채널 방어, code-reviewer 반영). 시크릿은 DB·클라이언트·반환값 어디에도 노출 안 됨.
+  - ✅ **진입(F023)**: `app/game/page.tsx`(입장 허브)에 "관리자로 입장" `Dialog`(시크릿 `<Input type="password">`) 추가 → `verifyAdminSecret` 성공 시 `sessionStorage["game_admin_secret"]` 저장 → `/game/manage` 이동. 진행자 `game_admin_ctx`와 동일 신뢰 모델(탭 종료 시 소멸, 매 액션 서버 재검증).
+  - ✅ **관리자 패널 페이지(F024)**: 신규 `app/game/manage/page.tsx`(client) — 시크릿 없으면 `/game` 리다이렉트. 섹션: 데이터 현황 / 진행자 PIN 확인·변경(`maxLength=4`·`inputMode=numeric`) / 현재 게임만 초기화(confirm) / 전체 데이터 완전 삭제(2단계 "삭제" 입력 확인) / 종료된 방 정리. sonner 토스트 + 성공 시 현황 재조회, `min-h-11` 유지.
+  - ✅ **신규 Server Action(모두 `isAdminSecretValid` 게이트)**: `verifyAdminSecret` / `getAdminOverview`(활성 방 status·adminPin·참가자 수·created_at + 전체/종료 방 수·각 테이블 행 수) / `changeAdminPin`(4자리 숫자 검증 후 UPDATE) / `softResetActiveGame`(공유 헬퍼 `resetRoomToWaiting` 재사용 — 기록 삭제·참가자 유지) / `hardResetAllData`(**삭제 전 활성 방에 GAME_RESET broadcast** → game_rooms 전체 DELETE `.not("id","is",null)` → 자식 CASCADE → 새 waiting 방+새 PIN 반환) / `purgeEndedRooms`(ended 방 DELETE→CASCADE, 삭제 개수).
+  - ✅ **admin_pin 노출은 관리자 게이트 뒤에서만**: `getAdminOverview`만 현재 PIN 반환. 기존 `getRoomState`/`getRoomPlayers`의 admin_pin 미포함 원칙 유지(미변경).
+  - ✅ **`resetGame` 회귀 없음**: 본문을 `resetRoomToWaiting(supabase, roomId)` 헬퍼로 추출하고 `resetGame`은 PIN 게이트 후 이 헬퍼에 위임 — 시그니처·반환 타입·try/catch 안전망·외부 동작 완전 동일(진행자 대시보드 리셋 그대로).
+  - ✅ **범위 준수**: 미들웨어(`proxy.ts`)·루트 레이아웃·DB 스키마·신규 npm 의존성 변경 없음. 진행자 PIN 게이트 액션 시그니처 변경 없음.
+  - ✅ **환경변수·문서**: `.env.example`에 `ADMIN_SECRET=` 템플릿(빈 값), `docs/deployment.md`에 필요 환경변수·"≥20자 무작위 문자열(`openssl rand -base64 24`)" 가이드·"하드 리셋/종료방 정리는 되돌릴 수 없고 진행 중 접속자가 즉시 정리됨" 운영 주의 추가.
+
+  ### 테스트 체크리스트 (qa-tester 10/10 PASS)
+  - [x] ADMIN_SECRET 설정 후 입장 허브 "관리자로 입장" → 틀린 시크릿 거부, 맞는 시크릿 → /game/manage 진입. 미설정 시 fail-safe 잠금(정적 확인) _(sessionStorage 없이 직접 접근 시 /game 리다이렉트도 확인)_
+  - [x] 패널의 "현재 PIN"이 SQL의 game_rooms.admin_pin과 일치하는가
+  - [x] PIN 변경 후 새 PIN으로 진행자 입장 성공·옛 PIN 거부, 4자리 아닌 입력 거부되는가
+  - [x] 현재 게임만 초기화 시 votes/messages/night_actions 0행, 참가자 레코드 유지(role=null·is_alive=true), room status=waiting인가
+  - [x] 전체 데이터 완전 삭제 시 정확히 새 waiting 방 1개+새 PIN, 자식 테이블 전부 0행인가 _(2단계 "삭제" 확인 잠금 동작 포함)_
+  - [x] 종료된 방 정리 시 ended 방·자식 CASCADE 삭제되고 활성 방은 무사, 삭제 개수 정확한가
+  - [x] 데이터 현황 통계(방/종료방/각 테이블 행 수)가 SQL과 일치하는가
+  - [x] lint/typecheck 통과, 콘솔 에러 없음, 관리자 액션 반환값에 시크릿·admin_pin이 의도 외로 새지 않는가 _(네트워크 응답 바디 직접 검사)_
+
+- **Task 020: 게임 운영 개선 5건 (시스템 메시지·진행자 역할 표시·채팅 스크롤·팀원 명단·투표 미마감 경고)** ✅ - 완료 (auto-dev · 브랜치 auto/game-ops-improvements)
+  - ✅ 배경: 실제 플레이 중 발견된 게임 운영 개선 5건을 하나의 태스크로 묶음. 이 중 팀원 명단(F025)·투표 미마감 경고(F026)는 신규 기능이고, 나머지 3건은 기존 기능(F013 등)의 버그 수정/미구현 완성. **범위 밖(하지 않음)**: DB 스키마·마이그레이션 변경 없음, 미들웨어·루트 레이아웃 변경 없음, 신규 npm 의존성 없음, `getRoomPlayers`/`getRoomState`의 role·admin_pin 미포함 원칙 유지(role은 신규 진행자 전용 액션에서만), 페이즈 전환 서버 로직(startPhaseTransition/commitPhaseTransition) 미변경.
+  - ✅ **code-reviewer 반영**: 높음 1건(ChatPanel이 이미 채워진 비밀/귓속말 탭을 처음 열 때 하단 자동 스크롤이 안 되던 회귀 → `isFirstRunRef`로 첫 마운트 시 무조건 하단 스크롤), 중간 1건(팀원 명단이 실시간 탈락에 미반영 → 기존 `PLAYER_ELIMINATED` 핸들러에서 `teammates`도 함께 patch), 낮음 2건(시스템 메시지 Input `maxLength=500`, `rolesById` 재조회를 게임 시작 1회+recoveryKey로 최소화·리셋 시 초기화) 모두 반영.
+  - ✅ **qa-tester 5/5 PASS**: 7탭(진행자+참가자6) 동시 실시간 검증 — 시스템 메시지 낮·밤 전파, 게임 시작 시 역할 자동 표시(스크린 탭 미노출), 버튼 클릭 시 window 스크롤 유지·탭 첫 오픈 시 최신으로 스크롤, 팀원 명단 교차 유출 없음·실시간 탈락 취소선 즉시 반영, 투표 미마감 경고/마감 후 바로 전환/밤→낮 무경고. 콘솔·네트워크 에러 0, 무차별 UI 회귀 없음.
+  - **① 시스템 메시지 발송(기존 F013 미구현 완성)**: 진행자 대시보드 "전송" 버튼이 하드코딩 `disabled`(`app/game/admin/page.tsx:857-864`, "데모, 실제 발송 로직 없음")이고 `sendSystemMessage` 서버 액션이 없어 **작동 자체가 안 됨**(낮 페이즈 문제 아님 — system 메시지 렌더는 낮/밤 모두 이미 정상). 신규 `sendSystemMessage(roomId, pin, content)` Server Action 추가(verifyAdminPin 게이트 → 트림·빈값 거부 → `resolveElimination`의 검증된 패턴 재사용: `game_messages`에 `player_id:null, channel:"system"` insert → `ChatMessagePayload`(senderNickname:"시스템")로 `broadcastToRoom(...CHAT_MESSAGE...)`). admin 버튼의 `disabled` 제거 + `handleSendSystemMessage` 연결(성공 시 입력 초기화·토스트).
+  - **② 진행자 대시보드 역할 표시(기존 F013 버그)**: `getRoomPlayers`가 role 미조회(무차별 UI 원칙)라 admin `toGamePlayer`가 role을 null 하드코딩(`admin/page.tsx:74-84`) → 제어 탭 역할 컬럼이 항상 "-". 신규 `getAdminRoster(roomId, pin)` Server Action(verifyAdminPin 게이트 → game_players의 id/nickname/role/is_alive 반환, 진행자 PIN 게이트라 role 노출 안전 — 기존 `getNightActionStatus` 선례). admin에 `rolesById` state 추가, `[adminCtx, status, recoveryKey]` effect로 조회(게임 시작=status→day 시 자동 갱신), 제어 탭 표의 역할 셀을 `rolesById[player.id]`로 렌더. **스크린 탭엔 역할 미노출 유지**. ROADMAP Task 009-1 백로그 항목 해소.
+  - **③ 채팅 스크롤 버그(순수 UX 수정)**: `ChatPanel`의 `scrollIntoView({block:"end"})`(`components/game/ChatPanel.tsx:36-38`)가 매 렌더 실행되며 window(문서) 스크롤까지 끌어당겨, play 화면에서 버튼 클릭(리렌더) 시 화면이 맨 위로 튐. 수정: 내부 ScrollArea viewport만 직접 스크롤(`viewport.scrollTop=scrollHeight`, window 미개입) + 새 메시지가 실제로 늘었을 때만 + 사용자가 하단 근처일 때만 자동 스크롤(과거 대화 읽는 중엔 안 끌어내림). 3개 탭이 공유하는 ChatPanel 한 곳 수정으로 전부 해결.
+  - **④ 팀원 명단 표시(F025 신규)**: 비밀 채널 소속 참가자에게 같은 팀 멤버 명단 표시. 신규 `getTeammates(token)` Server Action(getSenderContext로 본인 role 확인 → isHeretic이면 이단 팀, isCouncil이면 당회, 그 외 none → 같은 방 해당 팀 role만 조회해 `{membership, teammates:[{id,nickname,role,isAlive}]}` 반환, 본인 포함, **요청자 자신의 팀만** 반환해 교차 유출 없음). play 페이지가 sessionToken으로 조회(마운트·recoveryKey)해 `SecretChannelTab`에 prop 전달. `SecretChannelTab`은 membership이 heretic/council이고 명단 있으면 채팅 목록 위에 "우리 팀: 닉네임(역할)…"(탈락자 구분) 렌더, 비소속은 개인 플레이스홀더 그대로 — **탭 제목·설명·레이아웃은 전원 동일 유지(무차별 UI: 내용만 분기)**. `ROLE_LABELS` 재사용.
+  - **⑤ 투표 미마감 밤 전환 경고(F026 신규, 클라이언트 전용)**: `handleCloseVoting`가 ok:true(탈락 확정)·`handleResolveTie` 성공 시 `votingResolvedThisPhase` 플래그 true 설정, 새 낮 시작(tally 리셋 effect `admin/page.tsx:179-186`)에서 false 리셋. `handleRequestTransition`에서 `next==="night" && !votingResolvedThisPhase`이면 확인 Dialog("이번 낮 투표를 마감하지 않았습니다. 탈락 처리 없이 밤으로 넘어갈까요?")를 먼저 띄우고 확정 시에만 startPhaseTransition. **서버 변경 없음**(기존 tie-resolution Dialog 재사용).
+
+  ### 테스트 체크리스트 (qa-tester 5/5 PASS)
+  - [x] 진행자가 시스템 메시지를 입력·전송하면 전 참가자 "전체" 탭에 낮·밤 모두 표시되고 빈 입력은 거부되는가 _(system 메시지는 기존 컨벤션대로 중앙 pill로 렌더 — 텍스트 프리픽스 아님)_
+  - [x] 게임 시작 후 진행자 [제어] 탭에 각 참가자 역할이 실제 배정값으로 표시되고(자동 갱신), [스크린] 탭엔 역할이 노출되지 않는가
+  - [x] play 화면에서 아래로 스크롤한 상태로 투표·전송 등 버튼을 눌러도 화면이 맨 위로 튀지 않고 스크롤 위치가 유지되는가(채팅 하단에 있을 때 새 메시지 자동 하단 이동은 유지) _(비밀/귓속말 탭 첫 오픈 시 최신으로 스크롤도 확인)_
+  - [x] 이단 팀·당회 소속 참가자의 비밀 채널 탭에 같은 팀 멤버 명단이 표시되고, 성도·권사님은 개인 플레이스홀더만 보이며, 다른 팀 명단은 노출되지 않는가 _(팀원 실시간 탈락 취소선 즉시 반영 확인)_
+  - [x] 낮에 투표를 마감하지 않고 밤 전환 시 확인 팝업이 뜨고, 투표 마감(또는 동률 처리) 후 전환 시엔 팝업 없이 바로 전환되며, 밤→낮 전환엔 경고가 없는가
+  - [x] lint/typecheck 통과, 콘솔 에러 없음, 무차별 UI 회귀 없음(비밀 채널 탭 제목·구조 전원 동일)

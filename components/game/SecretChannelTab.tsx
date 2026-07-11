@@ -3,10 +3,20 @@
 // 카드 제목·설명·구조는 절대 분기하지 않는다.
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ChatPanel } from "@/components/game/ChatPanel";
-import type { GameMessage } from "@/lib/game/types";
+import { ROLE_LABELS } from "@/lib/game/constants";
+import type { GameMessage, PlayerRole } from "@/lib/game/types";
+import { cn } from "@/lib/utils";
 
 /** 비밀 채널 소속 — 이단 팀 / 당회(목사님·장로님) / 소속 없음 */
 type SecretChannelMembership = "heretic" | "council" | "none";
+
+/** 팀원 명단 항목 — getTeammates(Task 020)의 반환 형태와 동일 */
+export interface SecretChannelTeammate {
+  id: string;
+  nickname: string;
+  role: PlayerRole;
+  isAlive: boolean;
+}
 
 interface SecretChannelTabProps {
   membership: SecretChannelMembership;
@@ -14,6 +24,8 @@ interface SecretChannelTabProps {
   currentPlayerId: string;
   /** 페이즈(낮/밤) 등 외부 사정으로 강제 비활성화할지 여부 — 실제 전송 자격은 서버가 최종 검증 */
   disabled?: boolean;
+  /** 본인 팀원 명단(본인 포함) — membership==='none'이면 항상 빈 배열/미전달이어야 한다 */
+  teammates?: SecretChannelTeammate[];
   /** 전송 버튼 클릭 시 호출 */
   onSend?: (text: string) => void;
 }
@@ -23,12 +35,16 @@ export function SecretChannelTab({
   messages,
   currentPlayerId,
   disabled,
+  teammates,
   onSend,
 }: SecretChannelTabProps) {
   // membership에 따라 데이터만 결정 — 레이아웃/라벨은 항상 동일하게 유지
   const isMember = membership !== "none";
   const panelMessages = isMember ? messages : [];
   const placeholder = isMember ? "메시지를 입력하세요" : "개인 기도 메모";
+  // 명단은 소속이 있을 때만 렌더한다 — membership이 'none'이면 teammates가 채워져 있어도
+  // (있을 수 없지만 방어적으로) 노출하지 않고 기존 개인 플레이스홀더 그대로 유지한다.
+  const showTeammates = isMember && teammates && teammates.length > 0;
 
   return (
     <Card>
@@ -38,7 +54,20 @@ export function SecretChannelTab({
           이 채널은 특별한 권한을 가진 참가자만 함께 열람할 수 있습니다.
         </CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex flex-col gap-3">
+        {showTeammates && (
+          <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-muted-foreground">
+            <span className="font-medium text-foreground">우리 팀:</span>
+            {teammates!.map((mate, index) => (
+              <span key={mate.id}>
+                <span className={cn(!mate.isAlive && "line-through opacity-60")}>
+                  {mate.nickname}({ROLE_LABELS[mate.role]})
+                </span>
+                {index < teammates!.length - 1 && " · "}
+              </span>
+            ))}
+          </div>
+        )}
         <ChatPanel
           messages={panelMessages}
           currentPlayerId={currentPlayerId}

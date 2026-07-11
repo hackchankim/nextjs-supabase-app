@@ -33,6 +33,7 @@ import { PlayerCard } from "@/components/game/PlayerCard";
 import {
   cancelPhaseTransition,
   closeVoting,
+  getAdminRoster,
   getNightActionStatus,
   getRoomPlayers,
   kickPlayer,
@@ -40,6 +41,7 @@ import {
   resetGame,
   resolveNight,
   resolveVoteElimination,
+  sendSystemMessage,
   startGame,
   startPhaseTransition,
   type NightActorStatus,
@@ -58,7 +60,7 @@ import {
   type PlayerLeftPayload,
   type VoteUpdatePayload,
 } from "@/lib/game/realtime";
-import type { GamePlayer } from "@/lib/game/types";
+import type { GamePlayer, PlayerRole } from "@/lib/game/types";
 import { createClient } from "@/lib/supabase/client";
 
 /** sessionStorage에 저장된 진행자 인증 컨텍스트 (verifyAdminPin 성공 시 game/page.tsx가 저장) */
@@ -106,6 +108,17 @@ export default function GameAdminPage() {
   const [isStarting, setIsStarting] = useState(false);
 
   const [systemMessage, setSystemMessage] = useState("");
+  const [isSendingSystemMessage, setIsSendingSystemMessage] = useState(false);
+  const [systemMessageError, setSystemMessageError] = useState<string | null>(null);
+
+  // 제어 탭 역할 표시(Task 020) — getAdminRoster(PIN 게이트)로 조회한 id→role 맵.
+  // getRoomPlayers는 role을 포함하지 않으므로(무차별 원칙) 별도로 조회해 표 렌더링에만 사용한다.
+  const [rolesById, setRolesById] = useState<Record<string, PlayerRole | null>>({});
+
+  // 투표 미마감 밤 전환 경고(Task 020) — 이번 낮에 투표 마감(단독/동률 확정) 처리가 됐는지
+  // 추적하는 클라 전용 가드. 새 낮이 시작되면(아래 tally 리셋 effect) false로 되돌린다.
+  const votingResolvedThisPhaseRef = useRef(false);
+  const [showNightWithoutVoteWarning, setShowNightWithoutVoteWarning] = useState(false);
 
   // 강퇴(Task 013-1) — 진행 중 상태 표시 및 오류 안내. 실제 목록/생존 반영은
   // kickPlayer가 유발하는 PLAYER_LEFT(대기실)/PLAYER_ELIMINATED(진행 중) broadcast로 처리한다.
@@ -162,6 +175,9 @@ export default function GameAdminPage() {
       setNightStatusError(null);
       setTransitionError(null);
       setEliminateError(null);
+      // 리셋 후 재시작 시 role이 다시 배분되므로, 이전 판의 rolesById를 비워 아래 역할
+      // 조회 effect가 "아직 못 가져온 상태"로 인식해 새로 채우도록 한다(코드 리뷰 반영).
+      setRolesById({});
     },
   });
 
@@ -176,14 +192,48 @@ export default function GameAdminPage() {
   }, [status]);
 
   // 투표 집계는 phase 스코프라 새 낮이 시작되면 이전 라운드 값이 남아 있으면 안 된다.
+  // 투표 마감 여부 가드(votingResolvedThisPhaseRef)도 새 낮마다 다시 "미마감"으로 되돌린다.
   useEffect(() => {
     if (status === "day") {
       setTally({});
       setVoterCount(0);
       setCloseError(null);
       setTieCandidates(null);
+      votingResolvedThisPhaseRef.current = false;
     }
   }, [status]);
+
+  // 제어 탭 역할 표시(Task 020) — role은 게임 시작 후 바뀌지 않으므로, 낮/밤 전환마다
+  // PIN 재검증+풀스캔을 반복하지 않도록 다음 두 경우에만 조회한다(코드 리뷰 반영):
+  // (1) 아직 한 번도 못 가져온 상태(rolesById가 비어있음)이면서 게임이 시작된(status !== 'waiting')
+  //     경우 — 게임 시작 순간 1회만 채운다.
+  // (2) recoveryKey가 바뀐 경우(재접속) — 이미 채워져 있어도 최신 상태로 다시 맞춘다.
+  // 게임 리셋 시 rolesById를 비우는 것(위 onReset)과 짝을 이뤄 재시작 후에는 다시 채워진다.
+  const lastRosterRecoveryKeyRef = useRef(recoveryKey);
+  useEffect(() => {
+    if (!adminCtx || status === "waiting") return;
+
+    const recoveryKeyChanged = lastRosterRecoveryKeyRef.current !== recoveryKey;
+    lastRosterRecoveryKeyRef.current = recoveryKey;
+
+    const alreadyLoaded = Object.keys(rolesById).length > 0;
+    if (alreadyLoaded && !recoveryKeyChanged) return;
+
+    let cancelled = false;
+    getAdminRoster(adminCtx.roomId, adminCtx.pin).then((result) => {
+      if (cancelled) return;
+      if (result.ok) {
+        const map: Record<string, PlayerRole | null> = {};
+        result.players.forEach((player) => {
+          map[player.id] = player.role;
+        });
+        setRolesById(map);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [adminCtx, status, recoveryKey, rolesById]);
 
   // sessionStorage에서 진행자 인증 컨텍스트 복원 — 없으면 입장 화면으로 되돌린다.
   useEffect(() => {
@@ -376,6 +426,7 @@ export default function GameAdminPage() {
       const result = await closeVoting(adminCtx.roomId, adminCtx.pin);
       if (result.ok) {
         setTieCandidates(null);
+        votingResolvedThisPhaseRef.current = true;
       } else if ("tie" in result) {
         setTieCandidates(result.candidates);
       } else {
@@ -398,6 +449,7 @@ export default function GameAdminPage() {
         const result = await resolveVoteElimination(adminCtx.roomId, adminCtx.pin, targetId);
         if (result.ok) {
           setTieCandidates(null);
+          votingResolvedThisPhaseRef.current = true;
         } else {
           setCloseError(result.error);
         }
@@ -491,8 +543,8 @@ export default function GameAdminPage() {
     [adminCtx, status],
   );
 
-  /** 페이즈 전환을 예약한다 — 현재 상태의 반대로 10초 카운트다운을 시작한다. */
-  const handleRequestTransition = useCallback(async () => {
+  /** 실제 페이즈 전환 예약 API 호출 — 필요한 확인 절차를 모두 통과한 뒤에만 호출된다. */
+  const executeRequestTransition = useCallback(async () => {
     if (!adminCtx) return;
     if (status !== "day" && status !== "night") return;
     const next = status === "day" ? "night" : "day";
@@ -509,6 +561,29 @@ export default function GameAdminPage() {
       setIsTransitioning(false);
     }
   }, [adminCtx, status]);
+
+  /**
+   * 페이즈 전환을 예약한다 — 현재 상태의 반대로 10초 카운트다운을 시작한다.
+   * 낮→밤 전환인데 이번 낮 투표를 한 번도 마감(단독 확정/동률 확정)하지 않았다면
+   * 탈락자 없이 밤으로 넘어가는 실수를 막기 위해 먼저 확인 Dialog를 띄운다(Task 020).
+   * 그 외(투표를 이미 마감함 / 밤→낮 전환)는 기존처럼 바로 전환을 예약한다.
+   */
+  const handleRequestTransition = useCallback(() => {
+    if (!adminCtx) return;
+    if (status !== "day" && status !== "night") return;
+    const next = status === "day" ? "night" : "day";
+    if (next === "night" && !votingResolvedThisPhaseRef.current) {
+      setShowNightWithoutVoteWarning(true);
+      return;
+    }
+    void executeRequestTransition();
+  }, [adminCtx, status, executeRequestTransition]);
+
+  /** 투표 미마감 경고 Dialog에서 [밤으로]를 확정했을 때 호출된다. */
+  const handleConfirmNightWithoutVote = useCallback(() => {
+    setShowNightWithoutVoteWarning(false);
+    void executeRequestTransition();
+  }, [executeRequestTransition]);
 
   /** 예약된 페이즈 전환을 취소한다. */
   const handleCancelTransition = useCallback(async () => {
@@ -543,6 +618,29 @@ export default function GameAdminPage() {
       .catch(() => setResetError("게임 초기화에 실패했습니다. 다시 시도해주세요."))
       .finally(() => setIsResetting(false));
   }, [adminCtx]);
+
+  /** 시스템 메시지를 전체 공개 채널에 발송한다(Task 020) — resolveElimination과 동일한
+   * 시스템 메시지 패턴을 서버가 재사용한다(sendSystemMessage). */
+  const handleSendSystemMessage = useCallback(async () => {
+    if (!adminCtx) return;
+    const trimmed = systemMessage.trim();
+    if (!trimmed) return;
+    setSystemMessageError(null);
+    setIsSendingSystemMessage(true);
+    try {
+      const result = await sendSystemMessage(adminCtx.roomId, adminCtx.pin, trimmed);
+      if (result.ok) {
+        setSystemMessage("");
+        toast.success("시스템 메시지를 발송했습니다");
+      } else {
+        setSystemMessageError(result.error);
+      }
+    } catch {
+      setSystemMessageError("메시지 발송에 실패했습니다. 다시 시도해주세요.");
+    } finally {
+      setIsSendingSystemMessage(false);
+    }
+  }, [adminCtx, systemMessage]);
 
   if (!ctxChecked || !adminCtx) {
     return null;
@@ -657,7 +755,9 @@ export default function GameAdminPage() {
                 {players.map((player) => (
                   <tr key={player.id} className="border-t">
                     <td className="p-2">{player.nickname}</td>
-                    <td className="p-2">{player.role ? ROLE_LABELS[player.role] : "-"}</td>
+                    <td className="p-2">
+                      {rolesById[player.id] ? ROLE_LABELS[rolesById[player.id] as PlayerRole] : "-"}
+                    </td>
                     <td className="p-2">
                       <Badge variant={player.isAlive ? "secondary" : "outline"}>
                         {player.isAlive ? "생존" : "탈락"}
@@ -759,7 +859,7 @@ export default function GameAdminPage() {
                 <Button
                   type="button"
                   className="min-h-11"
-                  onClick={() => void handleRequestTransition()}
+                  onClick={handleRequestTransition}
                   disabled={!!transitionTo || isTransitioning || winner !== null}
                 >
                   {status === "day" ? "밤으로 전환" : "낮으로 전환"}
@@ -844,25 +944,29 @@ export default function GameAdminPage() {
             )}
           </div>
 
-          {/* 시스템 메시지 발송 (데모, 실제 발송 로직 없음) */}
+          {/* 시스템 메시지 발송(Task 020) */}
           <div className="flex flex-col gap-2 rounded-lg border p-4">
             <span className="text-sm font-medium text-muted-foreground">시스템 메시지</span>
             <div className="flex gap-2">
+              {/* maxLength는 서버 MESSAGE_MAX_LENGTH(actions.ts)와 동일하게 500 — 초과 입력 후
+                  서버 왕복으로만 에러를 알게 되는 불필요한 라운드트립을 줄인다(코드 리뷰 반영). */}
               <Input
                 className="min-h-11"
                 value={systemMessage}
                 onChange={(event) => setSystemMessage(event.target.value)}
                 placeholder="전체 참가자에게 보낼 메시지를 입력하세요"
+                maxLength={500}
               />
               <Button
                 type="button"
                 className="min-h-11"
-                disabled
-                title="이후 태스크에서 Server Action으로 구현 예정"
+                onClick={() => void handleSendSystemMessage()}
+                disabled={isSendingSystemMessage || systemMessage.trim().length === 0}
               >
                 전송
               </Button>
             </div>
+            {systemMessageError && <p className="text-destructive text-sm">{systemMessageError}</p>}
           </div>
 
           {/* 게임 종료/초기화 — 강제 종료는 범위 밖(승리 조건 자동 판정), 리셋은 실제 동작 */}
@@ -912,6 +1016,39 @@ export default function GameAdminPage() {
                 <span className="text-muted-foreground">{candidate.count}표</span>
               </Button>
             ))}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 투표 미마감 밤 전환 경고(Task 020) — 낮→밤 전환인데 이번 낮 투표를 마감하지 않았을 때만 뜬다 */}
+      <Dialog
+        open={showNightWithoutVoteWarning}
+        onOpenChange={(open) => !open && setShowNightWithoutVoteWarning(false)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>투표 미마감</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            이번 낮 투표를 마감하지 않았습니다. 탈락 처리 없이 밤으로 넘어갈까요?
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              className="min-h-11"
+              onClick={() => setShowNightWithoutVoteWarning(false)}
+            >
+              취소
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              className="min-h-11"
+              onClick={handleConfirmNightWithoutVote}
+            >
+              밤으로
+            </Button>
           </div>
         </DialogContent>
       </Dialog>
