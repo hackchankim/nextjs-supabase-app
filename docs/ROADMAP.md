@@ -485,7 +485,7 @@
 
 ---
 
-### Phase 4: 고급 기능 및 최적화 ✅
+### Phase 4: 고급 기능 및 최적화
 
 - **Task 015: 모바일 UX 최적화** ✅ - 완료 (auto-dev · 브랜치 auto/mobile-ux)
   - ✅ 터치 영역 최적화 — 게임 화면 주요 버튼·탭 트리거·투표/행동 대상에 `min-h-11`(44px) 적용, shadcn 전역 파일(components/ui/*)은 미수정. 390×844 실측 전 항목 ≥44px
@@ -575,3 +575,19 @@
   - [x] 종료된 방 정리 시 ended 방·자식 CASCADE 삭제되고 활성 방은 무사, 삭제 개수 정확한가
   - [x] 데이터 현황 통계(방/종료방/각 테이블 행 수)가 SQL과 일치하는가
   - [x] lint/typecheck 통과, 콘솔 에러 없음, 관리자 액션 반환값에 시크릿·admin_pin이 의도 외로 새지 않는가 _(네트워크 응답 바디 직접 검사)_
+
+- **Task 020: 게임 운영 개선 5건 (시스템 메시지·진행자 역할 표시·채팅 스크롤·팀원 명단·투표 미마감 경고)** - 우선순위
+  - 배경: 실제 플레이 중 발견된 게임 운영 개선 5건을 하나의 태스크로 묶음. 이 중 팀원 명단(F025)·투표 미마감 경고(F026)는 신규 기능이고, 나머지 3건은 기존 기능(F013 등)의 버그 수정/미구현 완성. **범위 밖(하지 않음)**: DB 스키마·마이그레이션 변경 없음, 미들웨어·루트 레이아웃 변경 없음, 신규 npm 의존성 없음, `getRoomPlayers`/`getRoomState`의 role·admin_pin 미포함 원칙 유지(role은 신규 진행자 전용 액션에서만), 페이즈 전환 서버 로직(startPhaseTransition/commitPhaseTransition) 미변경.
+  - **① 시스템 메시지 발송(기존 F013 미구현 완성)**: 진행자 대시보드 "전송" 버튼이 하드코딩 `disabled`(`app/game/admin/page.tsx:857-864`, "데모, 실제 발송 로직 없음")이고 `sendSystemMessage` 서버 액션이 없어 **작동 자체가 안 됨**(낮 페이즈 문제 아님 — system 메시지 렌더는 낮/밤 모두 이미 정상). 신규 `sendSystemMessage(roomId, pin, content)` Server Action 추가(verifyAdminPin 게이트 → 트림·빈값 거부 → `resolveElimination`의 검증된 패턴 재사용: `game_messages`에 `player_id:null, channel:"system"` insert → `ChatMessagePayload`(senderNickname:"시스템")로 `broadcastToRoom(...CHAT_MESSAGE...)`). admin 버튼의 `disabled` 제거 + `handleSendSystemMessage` 연결(성공 시 입력 초기화·토스트).
+  - **② 진행자 대시보드 역할 표시(기존 F013 버그)**: `getRoomPlayers`가 role 미조회(무차별 UI 원칙)라 admin `toGamePlayer`가 role을 null 하드코딩(`admin/page.tsx:74-84`) → 제어 탭 역할 컬럼이 항상 "-". 신규 `getAdminRoster(roomId, pin)` Server Action(verifyAdminPin 게이트 → game_players의 id/nickname/role/is_alive 반환, 진행자 PIN 게이트라 role 노출 안전 — 기존 `getNightActionStatus` 선례). admin에 `rolesById` state 추가, `[adminCtx, status, recoveryKey]` effect로 조회(게임 시작=status→day 시 자동 갱신), 제어 탭 표의 역할 셀을 `rolesById[player.id]`로 렌더. **스크린 탭엔 역할 미노출 유지**. ROADMAP Task 009-1 백로그 항목 해소.
+  - **③ 채팅 스크롤 버그(순수 UX 수정)**: `ChatPanel`의 `scrollIntoView({block:"end"})`(`components/game/ChatPanel.tsx:36-38`)가 매 렌더 실행되며 window(문서) 스크롤까지 끌어당겨, play 화면에서 버튼 클릭(리렌더) 시 화면이 맨 위로 튐. 수정: 내부 ScrollArea viewport만 직접 스크롤(`viewport.scrollTop=scrollHeight`, window 미개입) + 새 메시지가 실제로 늘었을 때만 + 사용자가 하단 근처일 때만 자동 스크롤(과거 대화 읽는 중엔 안 끌어내림). 3개 탭이 공유하는 ChatPanel 한 곳 수정으로 전부 해결.
+  - **④ 팀원 명단 표시(F025 신규)**: 비밀 채널 소속 참가자에게 같은 팀 멤버 명단 표시. 신규 `getTeammates(token)` Server Action(getSenderContext로 본인 role 확인 → isHeretic이면 이단 팀, isCouncil이면 당회, 그 외 none → 같은 방 해당 팀 role만 조회해 `{membership, teammates:[{id,nickname,role,isAlive}]}` 반환, 본인 포함, **요청자 자신의 팀만** 반환해 교차 유출 없음). play 페이지가 sessionToken으로 조회(마운트·recoveryKey)해 `SecretChannelTab`에 prop 전달. `SecretChannelTab`은 membership이 heretic/council이고 명단 있으면 채팅 목록 위에 "우리 팀: 닉네임(역할)…"(탈락자 구분) 렌더, 비소속은 개인 플레이스홀더 그대로 — **탭 제목·설명·레이아웃은 전원 동일 유지(무차별 UI: 내용만 분기)**. `ROLE_LABELS` 재사용.
+  - **⑤ 투표 미마감 밤 전환 경고(F026 신규, 클라이언트 전용)**: `handleCloseVoting`가 ok:true(탈락 확정)·`handleResolveTie` 성공 시 `votingResolvedThisPhase` 플래그 true 설정, 새 낮 시작(tally 리셋 effect `admin/page.tsx:179-186`)에서 false 리셋. `handleRequestTransition`에서 `next==="night" && !votingResolvedThisPhase`이면 확인 Dialog("이번 낮 투표를 마감하지 않았습니다. 탈락 처리 없이 밤으로 넘어갈까요?")를 먼저 띄우고 확정 시에만 startPhaseTransition. **서버 변경 없음**(기존 tie-resolution Dialog 재사용).
+
+  ### 테스트 체크리스트
+  - [ ] 진행자가 시스템 메시지를 입력·전송하면 전 참가자 "전체" 탭에 "시스템: …"이 낮·밤 모두 표시되고 빈 입력은 거부되는가
+  - [ ] 게임 시작 후 진행자 [제어] 탭에 각 참가자 역할이 실제 배정값으로 표시되고(자동 갱신), [스크린] 탭엔 역할이 노출되지 않는가
+  - [ ] play 화면에서 아래로 스크롤한 상태로 투표·전송 등 버튼을 눌러도 화면이 맨 위로 튀지 않고 스크롤 위치가 유지되는가(채팅 하단에 있을 때 새 메시지 자동 하단 이동은 유지)
+  - [ ] 이단 팀·당회 소속 참가자의 비밀 채널 탭에 같은 팀 멤버 명단이 표시되고, 성도·권사님은 개인 플레이스홀더만 보이며, 다른 팀 명단은 노출되지 않는가
+  - [ ] 낮에 투표를 마감하지 않고 밤 전환 시 확인 팝업이 뜨고, 투표 마감(또는 동률 처리) 후 전환 시엔 팝업 없이 바로 전환되며, 밤→낮 전환엔 경고가 없는가
+  - [ ] lint/typecheck 통과, 콘솔 에러 없음, 무차별 UI 회귀 없음(비밀 채널 탭 제목·구조 전원 동일)
