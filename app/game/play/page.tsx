@@ -35,8 +35,10 @@ import { VoteButton } from "@/components/game/VoteButton";
 import {
   getGameResult,
   getRoomPlayers,
+  getTeammates,
   type GameResultPlayer,
   type RoomPlayer,
+  type TeammatePlayer,
 } from "@/lib/game/actions";
 import { useGameChat } from "@/lib/game/hooks/useGameChat";
 import { useGameNight } from "@/lib/game/hooks/useGameNight";
@@ -189,6 +191,23 @@ export default function GamePlayPage() {
       ? "council"
       : "none";
 
+  // 팀원 명단(Task 020) — getTeammates가 서버에서 본인 팀만 판별해 반환하므로(교차 유출 없음),
+  // membership==='none'이면 항상 빈 배열이 온다. 마운트·재접속(recoveryKey) 시 재조회한다.
+  const [teammates, setTeammates] = useState<TeammatePlayer[]>([]);
+  useEffect(() => {
+    if (!sessionToken) return;
+    let cancelled = false;
+    getTeammates(sessionToken).then((result) => {
+      if (cancelled) return;
+      if (result.ok) {
+        setTeammates(result.teammates);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionToken, recoveryKey]);
+
   // 현재 활성 탭에 대응하는 실제 채팅 채널 — 비활성 탭에 도착한 메시지 토스트 알림 판단에 쓰인다.
   const activeChannel: ChatChannel | null =
     activeTab === "public" ? "public" : activeTab === "dm" ? "dm" : membership === "none" ? null : membership;
@@ -260,6 +279,9 @@ export default function GamePlayPage() {
         setPlayers((prev) =>
           prev.map((p) => (p.id === playerId ? { ...p, isAlive: false } : p)),
         );
+        // 팀원 명단(Task 020)도 같은 델타로 함께 patch한다 — 탈락한 참가자가 본인 팀원이면
+        // "우리 팀" 명단의 취소선 표시가 재조회 없이 실시간으로 반영된다(코드 리뷰 반영).
+        setTeammates((prev) => prev.map((t) => (t.id === playerId ? { ...t, isAlive: false } : t)));
         if (playerId === player.id) {
           setSelfEliminated(true);
         }
@@ -431,6 +453,7 @@ export default function GamePlayPage() {
               messages={secretMessages}
               currentPlayerId={player.id}
               disabled={status === "day" || !selfAlive}
+              teammates={teammates}
               onSend={(text) => {
                 if (membership === "none") return;
                 void handleSend(membership, text);

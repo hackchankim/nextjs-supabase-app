@@ -25,6 +25,8 @@ import {
   isHeretic,
 } from "@/lib/game/utils";
 import {
+  COUNCIL_ROLES,
+  HERETIC_ROLES,
   MIN_PLAYERS,
   MAX_PLAYERS,
   NIGHT_ACTION_ROLES,
@@ -2292,6 +2294,190 @@ export async function getGameResult(roomId: string): Promise<GameResult | null> 
     };
   } catch {
     return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 게임 운영 개선 (Task 020)
+// ─────────────────────────────────────────────────────────────────────────
+
+type SendSystemMessageResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * 진행자가 임의의 문구를 시스템 메시지로 전체 공개 채널에 발송한다(PIN 게이트).
+ * resolveElimination(~1027행)의 검증된 시스템 메시지 패턴을 그대로 재사용한다 —
+ * game_messages에 player_id:null·channel:'system'으로 insert한 뒤 ChatMessagePayload를
+ * 구성해 broadcastToRoom으로 fan-out한다(system 채널은 공개 room 채널 1회로 충분).
+ */
+export async function sendSystemMessage(
+  roomId: string,
+  pin: string,
+  content: string,
+): Promise<SendSystemMessageResult> {
+  const verifyResult = await verifyAdminPin(pin, roomId);
+  if (!verifyResult.ok) {
+    return verifyResult;
+  }
+  if (verifyResult.roomId !== roomId) {
+    return { ok: false, error: "PIN이 올바르지 않습니다" };
+  }
+
+  try {
+    const trimmed = content.trim();
+    if (trimmed.length === 0) {
+      return { ok: false, error: "메시지를 입력해주세요" };
+    }
+    if (trimmed.length > MESSAGE_MAX_LENGTH) {
+      return { ok: false, error: `메시지는 ${MESSAGE_MAX_LENGTH}자 이하로 입력해주세요` };
+    }
+
+    const supabase = createAdminClient();
+
+    const { data: message, error: insertError } = await supabase
+      .from("game_messages")
+      .insert({ room_id: roomId, player_id: null, channel: "system", content: trimmed })
+      .select("id, created_at")
+      .single();
+
+    if (insertError || !message) {
+      return {
+        ok: false,
+        error: `메시지 발송 실패: ${insertError?.message ?? "알 수 없는 오류"}`,
+      };
+    }
+
+    const payload: ChatMessagePayload = {
+      id: message.id,
+      channel: "system",
+      senderId: null,
+      senderNickname: "시스템",
+      text: trimmed,
+      recipientId: null,
+      createdAt: message.created_at,
+    };
+    await broadcastToRoom(roomId, GAME_EVENTS.CHAT_MESSAGE, payload);
+
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
+  }
+}
+
+export interface AdminRosterPlayer {
+  id: string;
+  nickname: string;
+  role: PlayerRole | null;
+  isAlive: boolean;
+}
+
+type GetAdminRosterResult =
+  | { ok: true; players: AdminRosterPlayer[] }
+  | { ok: false; error: string };
+
+/**
+ * 진행자가 참가자 전원의 역할·생존 여부를 조회한다(PIN 게이트) — getNightActionStatus와
+ * 동일한 근거로 진행자 PIN 인증을 통과한 뒤에만 role을 노출한다(참가자 화면에는 절대 노출 금지).
+ * getRoomPlayers/getRoomState의 role 미포함 원칙과는 별개의, PIN으로 게이트된 진입점이다.
+ */
+export async function getAdminRoster(roomId: string, pin: string): Promise<GetAdminRosterResult> {
+  const verifyResult = await verifyAdminPin(pin, roomId);
+  if (!verifyResult.ok) {
+    return verifyResult;
+  }
+  if (verifyResult.roomId !== roomId) {
+    return { ok: false, error: "PIN이 올바르지 않습니다" };
+  }
+
+  try {
+    const supabase = createAdminClient();
+
+    const { data: players, error } = await supabase
+      .from("game_players")
+      .select("id, nickname, role, is_alive")
+      .eq("room_id", roomId);
+
+    if (error) {
+      return { ok: false, error: `참가자 조회 실패: ${error.message}` };
+    }
+
+    return {
+      ok: true,
+      players: (players ?? []).map((player) => ({
+        id: player.id,
+        nickname: player.nickname,
+        role: player.role as PlayerRole | null,
+        isAlive: player.is_alive,
+      })),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
+  }
+}
+
+export interface TeammatePlayer {
+  id: string;
+  nickname: string;
+  role: PlayerRole;
+  isAlive: boolean;
+}
+
+type GetTeammatesResult =
+  | { ok: true; membership: "heretic" | "council" | "none"; teammates: TeammatePlayer[] }
+  | { ok: false; error: string };
+
+/**
+ * 세션 토큰으로 본인 팀(이단 팀/당회) 명단을 조회한다.
+ * getSenderContext로 본인 role을 먼저 확인한 뒤, 그 팀 role에 해당하는 같은 방 참가자만
+ * 조회해 반환한다 — 요청자 자신의 팀만 반환되므로(성도·권사님은 membership:'none'→빈 배열)
+ * 교차 유출(예: 성도가 이단 명단을 얻는 것)은 이 함수의 반환 경로상 구조적으로 불가능하다.
+ */
+export async function getTeammates(token: string): Promise<GetTeammatesResult> {
+  try {
+    const supabase = createAdminClient();
+    const sender = await getSenderContext(supabase, token);
+
+    if (!sender) {
+      return { ok: false, error: "세션이 유효하지 않습니다" };
+    }
+
+    if (!isHeretic(sender.role) && !isCouncil(sender.role)) {
+      return { ok: true, membership: "none", teammates: [] };
+    }
+
+    const membership: "heretic" | "council" = isHeretic(sender.role) ? "heretic" : "council";
+    const teamRoles = membership === "heretic" ? HERETIC_ROLES : COUNCIL_ROLES;
+
+    const { data: players, error } = await supabase
+      .from("game_players")
+      .select("id, nickname, role, is_alive")
+      .eq("room_id", sender.roomId)
+      .in("role", teamRoles as string[]);
+
+    if (error) {
+      return { ok: false, error: `팀원 조회 실패: ${error.message}` };
+    }
+
+    return {
+      ok: true,
+      membership,
+      teammates: (players ?? []).map((player) => ({
+        id: player.id,
+        nickname: player.nickname,
+        role: player.role as PlayerRole,
+        isAlive: player.is_alive,
+      })),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
   }
 }
 
