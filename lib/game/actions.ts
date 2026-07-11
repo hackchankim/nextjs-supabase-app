@@ -1,5 +1,7 @@
 "use server";
 
+import { createHash, timingSafeEqual } from "crypto";
+
 import { createAdminClient } from "@/lib/supabase/admin";
 import { broadcastToRoom, broadcastToTopic } from "@/lib/game/broadcast";
 import { computeInboxToken } from "@/lib/game/inbox";
@@ -63,6 +65,26 @@ function generateAdminPin(): string {
   return Math.floor(Math.random() * max)
     .toString()
     .padStart(ADMIN_PIN_LENGTH, "0");
+}
+
+/**
+ * 관리자(운영자) 시크릿을 검증한다 — 진행자 4자리 PIN과 완전히 분리된 상위 게이트다.
+ * `ADMIN_SECRET` 환경변수가 설정되어 있지 않거나 빈 문자열이면 무조건 실패로 처리한다
+ * (fail-safe): 배포 환경에 시크릿을 깜빡 설정하지 않았을 때 관리자 기능이 "누구나 통과"가
+ * 아니라 "전부 잠김"이 되도록 보장하기 위함이다.
+ *
+ * 비교는 반드시 상수시간으로 수행한다 — ADMIN_SECRET은 전체 데이터 삭제까지 가능한
+ * 최상위 시크릿이라 단순 `===` 비교의 타이밍 사이드채널(불일치 지점까지 걸리는 시간 차)에
+ * 노출되면 안 된다. 두 값을 SHA-256으로 먼저 해시해 항상 32바이트 고정 길이로 맞춘 뒤
+ * `timingSafeEqual`로 비교한다 — 원문 길이가 달라도 길이 유출이 없고, 해시 자체의 조기
+ * 반환(short-circuit) 여지도 없앤다.
+ */
+function isAdminSecretValid(secret: string): boolean {
+  const expected = process.env.ADMIN_SECRET;
+  if (!expected) return false; // 미설정 fail-safe — 상수시간 비교보다 먼저 확인해도 안전(시크릿 부재는 비밀이 아님)
+  const a = createHash("sha256").update(secret).digest();
+  const b = createHash("sha256").update(expected).digest();
+  return timingSafeEqual(a, b);
 }
 
 /**
@@ -2135,9 +2157,68 @@ export async function kickPlayer(
 type ResetGameResult = { ok: true } | { ok: false; error: string };
 
 /**
- * 진행자가 게임을 초기화한다(PIN 게이트) — 투표/밤 행동/채팅 기록을 삭제하고 참가자의
+ * 방의 진행 기록을 초기화하는 본체 로직 — 투표/밤 행동/채팅 기록을 삭제하고 참가자의
  * role/is_alive를 초기화한 뒤 방 상태를 waiting으로 되돌린다. **참가자 레코드 자체는
  * 유지한다**(행사 재시작 시 닉네임을 다시 입력하지 않아도 되도록).
+ *
+ * `resetGame`(진행자 PIN 게이트)과 `softResetActiveGame`(관리자 시크릿 게이트, Task 019)이
+ * 인증만 각자 처리한 뒤 이 헬퍼를 공유한다 — export하지 않는다.
+ */
+async function resetRoomToWaiting(
+  supabase: AdminClient,
+  roomId: string,
+): Promise<ResetGameResult> {
+  const { error: votesError } = await supabase.from("game_votes").delete().eq("room_id", roomId);
+  if (votesError) {
+    return { ok: false, error: `투표 기록 초기화 실패: ${votesError.message}` };
+  }
+
+  const { error: nightActionsError } = await supabase
+    .from("game_night_actions")
+    .delete()
+    .eq("room_id", roomId);
+  if (nightActionsError) {
+    return { ok: false, error: `밤 행동 기록 초기화 실패: ${nightActionsError.message}` };
+  }
+
+  const { error: messagesError } = await supabase
+    .from("game_messages")
+    .delete()
+    .eq("room_id", roomId);
+  if (messagesError) {
+    return { ok: false, error: `채팅 기록 초기화 실패: ${messagesError.message}` };
+  }
+
+  const { error: playersError } = await supabase
+    .from("game_players")
+    .update({ role: null, is_alive: true })
+    .eq("room_id", roomId);
+  if (playersError) {
+    return { ok: false, error: `참가자 초기화 실패: ${playersError.message}` };
+  }
+
+  const { error: roomError } = await supabase
+    .from("game_rooms")
+    .update({
+      status: "waiting",
+      phase_number: 0,
+      winner: null,
+      transition_to: null,
+      transition_at: null,
+    })
+    .eq("id", roomId);
+  if (roomError) {
+    return { ok: false, error: `게임 방 초기화 실패: ${roomError.message}` };
+  }
+
+  await broadcastToRoom(roomId, GAME_EVENTS.GAME_RESET, {});
+
+  return { ok: true };
+}
+
+/**
+ * 진행자가 게임을 초기화한다(PIN 게이트) — PIN 검증 후 resetRoomToWaiting에 위임한다.
+ * 외부 시그니처·동작은 이 함수가 헬퍼로 추출되기 전과 완전히 동일하다.
  */
 export async function resetGame(roomId: string, pin: string): Promise<ResetGameResult> {
   const verifyResult = await verifyAdminPin(pin, roomId);
@@ -2150,56 +2231,7 @@ export async function resetGame(roomId: string, pin: string): Promise<ResetGameR
 
   try {
     const supabase = createAdminClient();
-
-    const { error: votesError } = await supabase
-      .from("game_votes")
-      .delete()
-      .eq("room_id", roomId);
-    if (votesError) {
-      return { ok: false, error: `투표 기록 초기화 실패: ${votesError.message}` };
-    }
-
-    const { error: nightActionsError } = await supabase
-      .from("game_night_actions")
-      .delete()
-      .eq("room_id", roomId);
-    if (nightActionsError) {
-      return { ok: false, error: `밤 행동 기록 초기화 실패: ${nightActionsError.message}` };
-    }
-
-    const { error: messagesError } = await supabase
-      .from("game_messages")
-      .delete()
-      .eq("room_id", roomId);
-    if (messagesError) {
-      return { ok: false, error: `채팅 기록 초기화 실패: ${messagesError.message}` };
-    }
-
-    const { error: playersError } = await supabase
-      .from("game_players")
-      .update({ role: null, is_alive: true })
-      .eq("room_id", roomId);
-    if (playersError) {
-      return { ok: false, error: `참가자 초기화 실패: ${playersError.message}` };
-    }
-
-    const { error: roomError } = await supabase
-      .from("game_rooms")
-      .update({
-        status: "waiting",
-        phase_number: 0,
-        winner: null,
-        transition_to: null,
-        transition_at: null,
-      })
-      .eq("id", roomId);
-    if (roomError) {
-      return { ok: false, error: `게임 방 초기화 실패: ${roomError.message}` };
-    }
-
-    await broadcastToRoom(roomId, GAME_EVENTS.GAME_RESET, {});
-
-    return { ok: true };
+    return await resetRoomToWaiting(supabase, roomId);
   } catch (error) {
     return {
       ok: false,
@@ -2260,5 +2292,306 @@ export async function getGameResult(roomId: string): Promise<GameResult | null> 
     };
   } catch {
     return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 관리자 패널 (Task 019) — 진행자 4자리 PIN보다 상위인 운영자 전용 도구.
+//
+// 진행자 PIN(admin_pin, DB 컬럼)과 여기서 말하는 "관리자 시크릿"(ADMIN_SECRET, 서버 전용
+// 환경변수)은 서로 다른 개념이다 — 이름이 비슷해 혼동하기 쉬우므로 주의:
+//   - admin_pin: 진행자가 자기 방을 운영하는 4자리 숫자. DB에 저장되고 방마다 다르다.
+//   - ADMIN_SECRET: 운영자만 아는 긴 문자열. DB에 저장되지 않고 .env로만 존재한다.
+//
+// 아래 모든 export 함수는 첫 줄에서 isAdminSecretValid(secret)를 통과해야만 동작한다.
+// ADMIN_SECRET 값 자체는 어떤 반환 payload에도 담기지 않는다. admin_pin은 getAdminOverview의
+// 반환값에서만(=이 게이트를 통과한 뒤에만) 노출되며, 그 외 조회 함수(getRoomState 등)의
+// admin_pin 미포함 원칙은 그대로 유지된다.
+// ─────────────────────────────────────────────────────────────────────────
+
+/** 관리자 시크릿 미인증 시 공통으로 반환하는 에러 메시지. */
+const ADMIN_AUTH_ERROR = "관리자 인증에 실패했습니다";
+
+type VerifyAdminSecretResult = { ok: true } | { ok: false; error: string };
+
+/** 관리자 시크릿만 검증한다 — 관리자 패널(/game/manage) 진입 게이트. */
+export async function verifyAdminSecret(secret: string): Promise<VerifyAdminSecretResult> {
+  if (!isAdminSecretValid(secret)) {
+    return { ok: false, error: ADMIN_AUTH_ERROR };
+  }
+  return { ok: true };
+}
+
+export interface AdminOverview {
+  /** 현재 활성(진행 중/대기) 방 id */
+  roomId: string;
+  status: GameStatus;
+  /** 활성 방의 진행자 PIN — 이 함수(게이트 통과 후)에서만 노출된다 */
+  adminPin: string;
+  /** 활성 방의 참가자 수 */
+  playerCount: number;
+  createdAt: string;
+  /** game_rooms 전체 행 수(활성 + 종료 포함) */
+  totalRooms: number;
+  /** status='ended'인 game_rooms 행 수 */
+  endedRooms: number;
+  /** game_players 전체 행 수(전체 방 누적) */
+  players: number;
+  /** game_messages 전체 행 수(전체 방 누적) */
+  messages: number;
+  /** game_votes 전체 행 수(전체 방 누적) */
+  votes: number;
+  /** game_night_actions 전체 행 수(전체 방 누적) */
+  nightActions: number;
+}
+
+type GetAdminOverviewResult =
+  | { ok: true; overview: AdminOverview }
+  | { ok: false; error: string };
+
+/**
+ * 관리자 패널의 현황 대시보드용 데이터를 집계한다(ADMIN_SECRET 게이트).
+ * 활성 방(getOrCreateActiveRoom)의 admin_pin·참가자 수와, 전체 테이블의 누적 행 수
+ * (`select("*", { count: "exact", head: true })` — 실제 행은 가져오지 않고 개수만 조회)를
+ * 함께 반환한다.
+ */
+export async function getAdminOverview(secret: string): Promise<GetAdminOverviewResult> {
+  if (!isAdminSecretValid(secret)) {
+    return { ok: false, error: ADMIN_AUTH_ERROR };
+  }
+
+  try {
+    const room = await getOrCreateActiveRoom();
+    const supabase = createAdminClient();
+
+    const [
+      playerCountRes,
+      totalRoomsRes,
+      endedRoomsRes,
+      playersRes,
+      messagesRes,
+      votesRes,
+      nightActionsRes,
+    ] = await Promise.all([
+      supabase
+        .from("game_players")
+        .select("*", { count: "exact", head: true })
+        .eq("room_id", room.id),
+      supabase.from("game_rooms").select("*", { count: "exact", head: true }),
+      supabase
+        .from("game_rooms")
+        .select("*", { count: "exact", head: true })
+        .eq("status", "ended"),
+      supabase.from("game_players").select("*", { count: "exact", head: true }),
+      supabase.from("game_messages").select("*", { count: "exact", head: true }),
+      supabase.from("game_votes").select("*", { count: "exact", head: true }),
+      supabase.from("game_night_actions").select("*", { count: "exact", head: true }),
+    ]);
+
+    const firstError = [
+      playerCountRes,
+      totalRoomsRes,
+      endedRoomsRes,
+      playersRes,
+      messagesRes,
+      votesRes,
+      nightActionsRes,
+    ].find((res) => res.error)?.error;
+
+    if (firstError) {
+      return { ok: false, error: `현황 조회 실패: ${firstError.message}` };
+    }
+
+    return {
+      ok: true,
+      overview: {
+        roomId: room.id,
+        status: room.status as GameStatus,
+        adminPin: room.admin_pin,
+        playerCount: playerCountRes.count ?? 0,
+        createdAt: room.created_at,
+        totalRooms: totalRoomsRes.count ?? 0,
+        endedRooms: endedRoomsRes.count ?? 0,
+        players: playersRes.count ?? 0,
+        messages: messagesRes.count ?? 0,
+        votes: votesRes.count ?? 0,
+        nightActions: nightActionsRes.count ?? 0,
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
+  }
+}
+
+type ChangeAdminPinResult = { ok: true } | { ok: false; error: string };
+
+/** 새 진행자 PIN 형식 검증용 — 정확히 4자리 숫자. */
+const NEW_ADMIN_PIN_RE = /^\d{4}$/;
+
+/**
+ * 활성 방의 진행자 PIN을 새 4자리 숫자로 변경한다(ADMIN_SECRET 게이트).
+ * 방 생성 시 자동 생성되어 아무도 조회할 수 없던 PIN을 운영자가 원하는 값으로 재설정하거나,
+ * getAdminOverview로 확인한 현재 PIN을 분실 대비로 바꿔둘 때 사용한다.
+ */
+export async function changeAdminPin(
+  secret: string,
+  newPin: string,
+): Promise<ChangeAdminPinResult> {
+  if (!isAdminSecretValid(secret)) {
+    return { ok: false, error: ADMIN_AUTH_ERROR };
+  }
+
+  if (!NEW_ADMIN_PIN_RE.test(newPin)) {
+    return { ok: false, error: "PIN은 4자리 숫자여야 합니다" };
+  }
+
+  try {
+    const room = await getOrCreateActiveRoom();
+    const supabase = createAdminClient();
+
+    const { error } = await supabase
+      .from("game_rooms")
+      .update({ admin_pin: newPin })
+      .eq("id", room.id);
+
+    if (error) {
+      return { ok: false, error: `PIN 변경 실패: ${error.message}` };
+    }
+
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
+  }
+}
+
+type SoftResetActiveGameResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * 현재 활성 방을 waiting 상태로 초기화한다(ADMIN_SECRET 게이트) — 진행 기록(투표/밤 행동/
+ * 채팅)만 지우고 참가자는 유지한다. 진행자가 자기 PIN을 잊어버렸거나 자리를 비웠을 때
+ * 운영자가 대신 리셋해주는 용도(내부적으로 resetGame과 동일한 resetRoomToWaiting을 공유).
+ */
+export async function softResetActiveGame(secret: string): Promise<SoftResetActiveGameResult> {
+  if (!isAdminSecretValid(secret)) {
+    return { ok: false, error: ADMIN_AUTH_ERROR };
+  }
+
+  try {
+    const room = await getOrCreateActiveRoom();
+    const supabase = createAdminClient();
+    return await resetRoomToWaiting(supabase, room.id);
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
+  }
+}
+
+type HardResetAllDataResult = { ok: true; newPin: string } | { ok: false; error: string };
+
+/**
+ * 전체 게임 데이터를 완전히 삭제하고 새 waiting 방을 생성한다(ADMIN_SECRET 게이트).
+ * **되돌릴 수 없다** — 모든 방(진행 중·대기·종료 불문)과 그에 딸린 참가자/채팅/투표/밤 행동이
+ * 전부 사라진다. game_rooms를 지우면 자식 4테이블(game_players/game_messages/game_votes/
+ * game_night_actions)은 FK `on delete cascade`(supabase/migrations/0001_game_schema.sql)로
+ * 자동 정리되므로 여기서 별도로 지우지 않는다.
+ * Supabase는 WHERE 없는 DELETE를 거부하므로 `.not("id","is",null)`(항상 참)로 전체 행을 지정한다.
+ * 새로 만든 방의 PIN은 아무도 모르므로(자동 생성) 반환값에 담아 관리자가 즉시 확인하게 한다.
+ *
+ * **삭제 전 활성 방에 GAME_RESET을 broadcast한다** — 소프트 리셋(resetRoomToWaiting)과 달리
+ * 이 함수는 방 자체를 지우므로 삭제 후에는 broadcast할 room이 이미 사라진 상태다. 진행 중인
+ * 방(status != 'ended')에 접속해 있던 참가자/진행자 클라이언트가 아무 이벤트도 못 받고
+ * 방치되는 것을 막기 위해, 삭제 직전에 비종료 방 id를 조회해 각각 GAME_RESET을 보낸다.
+ * 클라이언트는 이를 받아 재조회/재라우팅되고, 곧이어 session_token 자체가 삭제되어 결국
+ * 입장 화면으로 정리된다(클린 슬레이트 의도와 일치). ended 방은 이미 종료되어 접속 중인
+ * 클라이언트가 없다고 보고 broadcast하지 않는다.
+ */
+export async function hardResetAllData(secret: string): Promise<HardResetAllDataResult> {
+  if (!isAdminSecretValid(secret)) {
+    return { ok: false, error: ADMIN_AUTH_ERROR };
+  }
+
+  try {
+    const supabase = createAdminClient();
+
+    const { data: activeRooms, error: activeRoomsError } = await supabase
+      .from("game_rooms")
+      .select("id")
+      .neq("status", "ended");
+    if (activeRoomsError) {
+      return { ok: false, error: `활성 방 조회 실패: ${activeRoomsError.message}` };
+    }
+
+    await Promise.all(
+      (activeRooms ?? []).map((room) =>
+        broadcastToRoom(room.id, GAME_EVENTS.GAME_RESET, {}),
+      ),
+    );
+
+    const { error: deleteError } = await supabase
+      .from("game_rooms")
+      .delete()
+      .not("id", "is", null);
+    if (deleteError) {
+      return { ok: false, error: `전체 데이터 삭제 실패: ${deleteError.message}` };
+    }
+
+    const newPin = generateAdminPin();
+    const { error: insertError } = await supabase
+      .from("game_rooms")
+      .insert({ admin_pin: newPin, status: "waiting" });
+
+    if (insertError) {
+      return { ok: false, error: `새 게임 방 생성 실패: ${insertError.message}` };
+    }
+
+    return { ok: true, newPin };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
+  }
+}
+
+type PurgeEndedRoomsResult =
+  | { ok: true; deletedCount: number }
+  | { ok: false; error: string };
+
+/**
+ * 종료(status='ended')된 방을 모두 삭제해 누적 데이터를 정리한다(ADMIN_SECRET 게이트).
+ * 활성 방(waiting/day/night)은 절대 대상이 아니다 — `.eq("status","ended")`만 지운다.
+ * 삭제된 방에 딸린 자식 테이블 데이터는 hardResetAllData와 동일하게 FK CASCADE로 정리된다.
+ */
+export async function purgeEndedRooms(secret: string): Promise<PurgeEndedRoomsResult> {
+  if (!isAdminSecretValid(secret)) {
+    return { ok: false, error: ADMIN_AUTH_ERROR };
+  }
+
+  try {
+    const supabase = createAdminClient();
+    const { data, error } = await supabase
+      .from("game_rooms")
+      .delete()
+      .eq("status", "ended")
+      .select("id");
+
+    if (error) {
+      return { ok: false, error: `종료된 방 정리 실패: ${error.message}` };
+    }
+
+    return { ok: true, deletedCount: data?.length ?? 0 };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
   }
 }
