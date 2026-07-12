@@ -226,12 +226,14 @@ export default function GamePlayPage() {
     }
   };
 
-  // 낮 투표 실데이터 — 초기 스냅샷 + VOTE_UPDATE 델타(집계만, 개별 투표자→대상 매핑 없음)
-  const { tally, myVote, castVote } = useGameVotes({
+  // 낮 투표 실데이터 — 초기 스냅샷 + VOTE_UPDATE 델타(집계 + 대상별 투표자 id 목록, 낮 투표 공개)
+  const { tally, voters, myVote, castVote } = useGameVotes({
     roomId: player?.roomId ?? "",
     sessionToken: sessionToken ?? "",
     recoveryKey,
   });
+  // 투표자 id 배열을 닉네임으로 변환 — "이 사람에게 투표한 사람" 팝업 표시용
+  const [voterListTarget, setVoterListTarget] = useState<string | null>(null);
 
   const handleVote = async (targetId: string) => {
     const result = await castVote(targetId);
@@ -329,10 +331,13 @@ export default function GamePlayPage() {
   // 로드 전이면 세션 초기값으로 폴백하고, 실시간 탈락(PLAYER_ELIMINATED)도 함께 반영한다.
   const selfAlive = (resume?.isAlive ?? player.isAlive) && !selfEliminated;
 
-  // 생존자 목록(자신 제외) — 낮 투표/밤 행동 공통 대상
+  // 생존자 목록(자신 제외) — 밤 행동 대상(ActionPanel)은 자신 제외 규칙을 그대로 유지한다.
   const aliveOthers = players
     .filter((p) => p.isAlive && p.id !== player.id)
     .map((p) => toGamePlayer(p, roomId));
+
+  // 낮 투표 대상(F009-a) — 자기 자신도 투표 가능하므로 생존자 전원을 대상으로 한다.
+  const aliveVoteTargets = players.filter((p) => p.isAlive).map((p) => toGamePlayer(p, roomId));
 
   // 밤 행동 가능 여부 — 외형은 절대 분기하지 않고, 오직 canAct(boolean)로만 활성화 여부 결정.
   // 탈락자는 어떤 역할이든 행동 불가(canPerformNightAction이 isAlive까지 검사).
@@ -442,7 +447,7 @@ export default function GamePlayPage() {
             <ChatPanel
               messages={publicMessages}
               currentPlayerId={player.id}
-              disabled={status === "night" || !selfAlive}
+              disabled={!selfAlive}
               onSend={(text) => void handleSend("public", text)}
             />
           </TabsContent>
@@ -466,7 +471,7 @@ export default function GamePlayPage() {
               players={players.map((p) => toGamePlayer(p, roomId))}
               currentPlayerId={player.id}
               messages={dmMessages}
-              disabled={status === "night" || !selfAlive}
+              disabled={!selfAlive}
               onSend={(text, recipientId) => void handleSend("dm", text, recipientId)}
             />
           </TabsContent>
@@ -478,33 +483,68 @@ export default function GamePlayPage() {
           "밤 행동"으로 고정이며 canAct(boolean)만으로 활성화 여부를 결정한다(역할별 분기 없음).
           게임이 종료(winner)되면 두 패널 모두 감춰 종료 후 조작 가능한 것처럼 보이지 않게 한다. */}
       {winner ? null : status === "day" ? (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Vote className="h-4 w-4" aria-hidden="true" /> 투표
-            </CardTitle>
-            <CardDescription>
-              이단으로 의심되는 사람을 지목하세요. 낮 동안 언제든 바꿀 수 있습니다.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-2">
-            {aliveOthers.map((target) => (
-              <div key={target.id} className="flex items-center gap-2">
-                <div className="flex-1">
-                  <VoteButton
-                    target={target}
-                    isSelected={myVote === target.id}
-                    onVote={handleVote}
-                    disabled={!selfAlive}
-                  />
+        <>
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Vote className="h-4 w-4" aria-hidden="true" /> 투표
+              </CardTitle>
+              <CardDescription>
+                이단으로 의심되는 사람을 지목하세요. 자신에게도 투표할 수 있으며, 낮 동안
+                언제든 바꿀 수 있습니다.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-2">
+              {aliveVoteTargets.map((target) => (
+                <div key={target.id} className="flex items-center gap-2">
+                  <div className="flex-1">
+                    <VoteButton
+                      target={target}
+                      isSelected={myVote === target.id}
+                      onVote={handleVote}
+                      disabled={!selfAlive}
+                    />
+                  </div>
+                  {/* 득표 수 클릭 시 이 대상에게 투표한 사람 명단을 팝업으로 표시(낮 투표 공개, F009-b) */}
+                  <button
+                    type="button"
+                    className="w-10 shrink-0 text-right text-sm text-muted-foreground underline-offset-2 hover:underline"
+                    onClick={() => setVoterListTarget(target.id)}
+                  >
+                    {tally[target.id] ?? 0}표
+                  </button>
                 </div>
-                <span className="w-10 shrink-0 text-right text-sm text-muted-foreground">
-                  {tally[target.id] ?? 0}표
-                </span>
+              ))}
+            </CardContent>
+          </Card>
+
+          {/* 투표자 명단 팝업 — 낮 투표는 공개이므로 자신에게 온 표를 포함해 누구나 확인 가능 */}
+          <Dialog
+            open={voterListTarget !== null}
+            onOpenChange={(open) => !open && setVoterListTarget(null)}
+          >
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>
+                  {voterListTarget
+                    ? `${players.find((p) => p.id === voterListTarget)?.nickname ?? "알 수 없음"}님에게 투표한 사람`
+                    : "투표자 명단"}
+                </DialogTitle>
+              </DialogHeader>
+              <div className="flex flex-col gap-1.5 py-2">
+                {voterListTarget && (voters[voterListTarget]?.length ?? 0) > 0 ? (
+                  voters[voterListTarget]!.map((voterId) => (
+                    <p key={voterId} className="text-sm">
+                      {players.find((p) => p.id === voterId)?.nickname ?? "알 수 없음"}
+                    </p>
+                  ))
+                ) : (
+                  <p className="text-sm text-muted-foreground">아직 없음</p>
+                )}
               </div>
-            ))}
-          </CardContent>
-        </Card>
+            </DialogContent>
+          </Dialog>
+        </>
       ) : (
         <ActionPanel
           targets={aliveOthers}

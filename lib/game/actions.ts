@@ -46,8 +46,6 @@ const MESSAGE_MAX_LENGTH = 500;
  */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** 낮에만 활성화되는 채널 (밤에는 비활성) */
-const DAY_ONLY_CHANNELS: readonly ChatChannel[] = ["public", "dm"];
 /** 밤에만 활성화되는 비밀 채널 (낮에는 비활성) */
 const NIGHT_ONLY_CHANNELS: readonly ChatChannel[] = ["heretic", "council"];
 
@@ -779,9 +777,10 @@ export async function sendMessage(
       return { ok: false, error: "게임 방을 찾을 수 없습니다" };
     }
 
-    // 페이즈 게이팅 — 서버가 최종 권위. public/dm은 낮에만, heretic/council은 밤에만 활성.
-    if (DAY_ONLY_CHANNELS.includes(channel) && room.status !== "day") {
-      return { ok: false, error: "낮에만 보낼 수 있는 채널입니다" };
+    // 페이즈 게이팅 — 서버가 최종 권위. public/dm은 낮·밤 모두 활성, heretic/council은 밤에만 활성.
+    const isPlayPhase = room.status === "day" || room.status === "night";
+    if ((channel === "public" || channel === "dm") && !isPlayPhase) {
+      return { ok: false, error: "게임 진행 중에만 보낼 수 있는 채널입니다" };
     }
     if (NIGHT_ONLY_CHANNELS.includes(channel) && room.status !== "night") {
       return { ok: false, error: "밤에만 보낼 수 있는 채널입니다" };
@@ -949,6 +948,8 @@ export async function getMessages(
 interface VoteTally {
   /** 대상 참가자 id → 득표 수 */
   tally: Record<string, number>;
+  /** 대상 참가자 id → 투표자 id 배열 (낮 투표는 공개이므로 대상별 투표자 명단도 함께 집계) */
+  voters: Record<string, string[]>;
   /** 이번 페이즈에 투표를 마친 고유 투표자 수 */
   voterCount: number;
   /** 현재 생존자 수 */
@@ -956,8 +957,9 @@ interface VoteTally {
 }
 
 /**
- * 현재 phase의 투표를 집계한다 (대상별 득표 수 + 고유 투표자 수 + 생존자 수).
- * 개별 투표자→대상 매핑은 이 함수 밖으로 반환하지 않는다 — 호출부는 집계 결과만 사용해야 한다.
+ * 현재 phase의 투표를 집계한다 (대상별 득표 수 + 대상별 투표자 id 목록 + 고유 투표자 수 +
+ * 생존자 수). 낮 투표는 공개이므로 voters(대상별 투표자 id 배열)도 함께 반환한다 — 닉네임이
+ * 아닌 id만 담아 경량화하며, 클라이언트가 보유한 players 목록으로 id→닉네임을 매핑한다.
  */
 async function computeTally(
   supabase: AdminClient,
@@ -975,9 +977,11 @@ async function computeTally(
   }
 
   const tally: Record<string, number> = {};
+  const voters: Record<string, string[]> = {};
   const voterIds = new Set<string>();
   (votes ?? []).forEach((vote) => {
     tally[vote.target_id] = (tally[vote.target_id] ?? 0) + 1;
+    (voters[vote.target_id] ??= []).push(vote.voter_id);
     voterIds.add(vote.voter_id);
   });
 
@@ -991,7 +995,7 @@ async function computeTally(
     throw new Error(`생존자 집계 실패: ${aliveError.message}`);
   }
 
-  return { tally, voterCount: voterIds.size, aliveCount: aliveCount ?? 0 };
+  return { tally, voters, voterCount: voterIds.size, aliveCount: aliveCount ?? 0 };
 }
 
 /**
@@ -1123,7 +1127,7 @@ type CastVoteResult = { ok: true } | { ok: false; error: string };
 /**
  * 낮 투표를 등록/변경한다 — 1인 1표, 같은 phase 내 재투표 시 대상을 덮어쓴다(UPSERT).
  * 서버가 페이즈(day)·생존 여부·대상 유효성을 최종 검증하는 최후 방어선이다.
- * 개별 투표자→대상 매핑은 Broadcast하지 않는다 — 대상별 집계만 VOTE_UPDATE로 공개한다.
+ * 낮 투표는 공개 — 대상별 투표자 id 목록을 함께 Broadcast한다(VOTE_UPDATE의 voters 필드).
  */
 export async function castVote(token: string, targetId: string): Promise<CastVoteResult> {
   try {
@@ -1138,7 +1142,7 @@ export async function castVote(token: string, targetId: string): Promise<CastVot
       return { ok: false, error: "탈락한 참가자는 투표할 수 없습니다" };
     }
 
-    if (!UUID_RE.test(targetId) || targetId === voter.id) {
+    if (!UUID_RE.test(targetId)) {
       return { ok: false, error: "투표 대상을 확인해주세요" };
     }
 
@@ -1196,6 +1200,8 @@ export async function castVote(token: string, targetId: string): Promise<CastVot
 export interface VoteState {
   /** 대상 참가자 id → 득표 수 */
   tally: Record<string, number>;
+  /** 대상 참가자 id → 투표자 id 배열 (낮 투표 공개 — 새로고침·지각 접속 스냅샷 복원용) */
+  voters: Record<string, string[]>;
   /** 본인이 이번 페이즈에 투표한 대상 id (미투표면 null) */
   myVote: string | null;
   /** 이번 페이즈에 투표를 마친 고유 투표자 수 */
@@ -1205,8 +1211,8 @@ export interface VoteState {
 }
 
 /**
- * 세션 토큰으로 현재 phase의 투표 스냅샷을 조회한다 (집계 + 본인 투표만).
- * role/다른 참가자의 투표 대상은 절대 포함하지 않는다.
+ * 세션 토큰으로 현재 phase의 투표 스냅샷을 조회한다 (집계 + 대상별 투표자 id 목록 + 본인 투표).
+ * role은 절대 포함하지 않는다.
  */
 export async function getVoteState(token: string): Promise<VoteState | null> {
   const supabase = createAdminClient();
@@ -1226,7 +1232,7 @@ export async function getVoteState(token: string): Promise<VoteState | null> {
     return null;
   }
 
-  const { tally, voterCount, aliveCount } = await computeTally(
+  const { tally, voters, voterCount, aliveCount } = await computeTally(
     supabase,
     voter.roomId,
     room.phase_number,
@@ -1242,6 +1248,7 @@ export async function getVoteState(token: string): Promise<VoteState | null> {
 
   return {
     tally,
+    voters,
     myVote: myVoteRow?.target_id ?? null,
     voterCount,
     aliveCount,

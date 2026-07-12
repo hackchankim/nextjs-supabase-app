@@ -3,9 +3,9 @@
 // 낮 투표 실데이터 훅 — 초기 스냅샷(getVoteState Server Action) + 공개 room 채널의
 // VOTE_UPDATE Broadcast 델타로 집계를 유지한다.
 //
-// VOTE_UPDATE 페이로드에는 대상별 집계(tally)만 담기고 "누가 누구에게 투표했는지"는
-// 절대 포함되지 않는다 — 본인 투표(myVote)는 castVote 성공 응답 시점에만 로컬로 반영한다
-// (다른 참가자의 투표 대상은 이 훅으로 알 수 없다 — 투표 비밀 보장).
+// 낮 투표는 공개다 — VOTE_UPDATE 페이로드에는 대상별 집계(tally)와 함께 대상별 투표자
+// id 목록(voters)도 담긴다. 본인 투표(myVote)는 voters로도 알 수 있지만, castVote 성공
+// 응답 시점에 로컬로 즉시 반영해 왕복 지연 없이 선택 상태를 보여준다.
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { castVote as castVoteAction, getVoteState } from "@/lib/game/actions";
@@ -23,6 +23,8 @@ interface UseGameVotesOptions {
 interface UseGameVotesResult {
   /** 대상 참가자 id → 득표 수 */
   tally: Record<string, number>;
+  /** 대상 참가자 id → 투표자 id 배열 (낮 투표 공개) */
+  voters: Record<string, string[]>;
   /** 본인이 이번 페이즈에 투표한 대상 id (미투표면 null) */
   myVote: string | null;
   /** 이번 페이즈에 투표를 마친 고유 투표자 수 */
@@ -40,6 +42,7 @@ export function useGameVotes({
   recoveryKey,
 }: UseGameVotesOptions): UseGameVotesResult {
   const [tally, setTally] = useState<Record<string, number>>({});
+  const [voters, setVoters] = useState<Record<string, string[]>>({});
   const [myVote, setMyVote] = useState<string | null>(null);
   const [voterCount, setVoterCount] = useState(0);
   const [aliveCount, setAliveCount] = useState(0);
@@ -70,6 +73,7 @@ export function useGameVotes({
           }
           voteSnapshotStaleRef.current = false;
           setTally(state.tally);
+          setVoters(state.voters);
           setMyVote(state.myVote);
           setVoterCount(state.voterCount);
           setAliveCount(state.aliveCount);
@@ -94,6 +98,7 @@ export function useGameVotes({
         voteSnapshotStaleRef.current = true;
         const update = payload as VoteUpdatePayload;
         setTally(update.tally);
+        setVoters(update.voters);
         setVoterCount(update.voterCount);
         setAliveCount(update.aliveCount);
       })
@@ -108,7 +113,7 @@ export function useGameVotes({
     async (targetId: string) => {
       const result = await castVoteAction(sessionToken, targetId);
       if (result.ok) {
-        // 본인 투표는 broadcast로 돌아오지 않으므로(투표 비밀 보장) 성공 시 로컬로 반영한다.
+        // VOTE_UPDATE broadcast 왕복을 기다리지 않고 성공 응답 시점에 즉시 로컬로 반영한다.
         setMyVote(targetId);
       }
       return result;
@@ -116,5 +121,5 @@ export function useGameVotes({
     [sessionToken],
   );
 
-  return { tally, myVote, voterCount, aliveCount, loading, castVote };
+  return { tally, voters, myVote, voterCount, aliveCount, loading, castVote };
 }
