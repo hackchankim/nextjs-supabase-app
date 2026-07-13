@@ -107,10 +107,6 @@ export default function GamePlayPage() {
   // 이 화면은 다른 참가자의 배지를 렌더하지 않으므로 반환값은 사용하지 않는다(track 목적).
   useGamePresence(player?.roomId ?? null, player?.id ?? null, recoveryKey);
 
-  // 재접속 스냅샷(Task 013-2) — 본인 role·생존 여부를 한 번에 복원한다. role은 밤 행동 가능
-  // 여부·비밀 채널 소속 계산에만 쓰이며, 남의 role은 어떤 경로로도 조회하지 않는다.
-  const { resume } = useGameResume(sessionToken, recoveryKey);
-  const role = resume?.role ?? null;
   const [players, setPlayers] = useState<RoomPlayer[]>([]);
   // 참가자 스냅샷 재조회 중 PLAYER_ELIMINATED가 도착했는지 추적한다(코드 리뷰 반영) —
   // 조회가 진행되는 사이 탈락 broadcast가 먼저 반영된 뒤 뒤늦게 도착한 stale 스냅샷이
@@ -143,6 +139,15 @@ export default function GamePlayPage() {
     onReset: () => router.replace("/game/waiting"),
     recoveryKey,
   });
+
+  // 재접속 스냅샷(Task 013-2) — 본인 role·생존 여부를 한 번에 복원한다. role은 밤 행동 가능
+  // 여부·비밀 채널 소속 계산에만 쓰이며, 남의 role은 어떤 경로로도 조회하지 않는다.
+  // phaseKey(`${status}:${phaseNumber}`)를 전달해 페이즈가 바뀔 때마다 재조회한다 — 이단 대장
+  // 역할 승계(Task 022 · F027)로 본인 role이 바뀐 승격자가 다음 페이즈 전환(대개 밤 진입) 시
+  // role을 갱신받아 밤 행동 패널(canAct)이 활성화되도록 하기 위함. 낮 투표로 승계된 경우
+  // 곧이은 낮→밤 전환에서 반영되며, useGameResume은 자체적으로 role 변경을 감지하지 못한다.
+  const { resume } = useGameResume(sessionToken, recoveryKey, `${status}:${phaseNumber}`);
+  const role = resume?.role ?? null;
 
   // 세션 기반 라우팅 가드 — 세션 없으면 입장 화면, 아직 대기 중이면 대기실로.
   useEffect(() => {

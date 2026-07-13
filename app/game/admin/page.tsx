@@ -27,12 +27,15 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PhaseBanner } from "@/components/game/PhaseBanner";
 import { PlayerCard } from "@/components/game/PlayerCard";
 import {
   cancelPhaseTransition,
   closeVoting,
+  getAdminChatLog,
+  getAdminInboxTopic,
   getAdminRoster,
   getNightActionStatus,
   getRoomPlayers,
@@ -55,12 +58,13 @@ import { getRoleDistribution } from "@/lib/game/utils";
 import {
   GAME_EVENTS,
   roomChannel,
+  type ChatMessagePayload,
   type PlayerEliminatedPayload,
   type PlayerJoinedPayload,
   type PlayerLeftPayload,
   type VoteUpdatePayload,
 } from "@/lib/game/realtime";
-import type { GamePlayer, PlayerRole } from "@/lib/game/types";
+import type { ChatChannel, GamePlayer, PlayerRole } from "@/lib/game/types";
 import { createClient } from "@/lib/supabase/client";
 
 /** sessionStorage에 저장된 진행자 인증 컨텍스트 (verifyAdminPin 성공 시 game/page.tsx가 저장) */
@@ -70,6 +74,35 @@ interface AdminCtx {
 }
 
 const ADMIN_CTX_KEY = "game_admin_ctx";
+
+/** 전체 대화 로그(Task 022) — 채널 태그 붙인 정규화된 표시 항목. 초기 스냅샷(getAdminChatLog)과
+ * 실시간 델타(관리 토픽 ChatMessagePayload)를 이 형태로 통일해 한 리스트에 병합한다. */
+interface AdminLogEntry {
+  id: string;
+  channel: ChatChannel;
+  senderNickname: string;
+  recipientNickname: string | null;
+  text: string;
+  createdAt: string;
+}
+
+/** 채널별 한글 태그 — 전체 대화 로그의 각 메시지 앞에 붙인다. */
+const CHANNEL_TAGS: Record<ChatChannel, string> = {
+  public: "공개",
+  heretic: "이단",
+  council: "당회",
+  dm: "귓속말",
+  system: "시스템",
+};
+
+/** id 기준 dedupe·병합 후 생성 시각 오름차순 정렬(초기 스냅샷과 델타 사이 레이스 대비). */
+function mergeLogById(existing: AdminLogEntry[], incoming: AdminLogEntry[]): AdminLogEntry[] {
+  const byId = new Map(existing.map((entry) => [entry.id, entry]));
+  incoming.forEach((entry) => byId.set(entry.id, entry));
+  return Array.from(byId.values()).sort(
+    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+  );
+}
 
 /** RoomPlayer(role 없음)를 기존 데모 UI가 기대하는 GamePlayer 형태로 변환한다.
  * 게임 시작 전에는 role이 없으므로 항상 null로 채운다. */
@@ -114,6 +147,19 @@ export default function GameAdminPage() {
   // 제어 탭 역할 표시(Task 020) — getAdminRoster(PIN 게이트)로 조회한 id→role 맵.
   // getRoomPlayers는 role을 포함하지 않으므로(무차별 원칙) 별도로 조회해 표 렌더링에만 사용한다.
   const [rolesById, setRolesById] = useState<Record<string, PlayerRole | null>>({});
+
+  // 전체 대화 로그(Task 022 · F028) — getAdminChatLog 초기 스냅샷 + 관리 토픽(fanOutToAdmin)
+  // 델타로 채운다. 모든 채널(공개/이단/당회/귓속말/시스템) 메시지를 채널 태그와 함께 표시한다.
+  const [chatLog, setChatLog] = useState<AdminLogEntry[]>([]);
+  // ChatPanel.tsx와 동일한 스크롤 패턴 — scrollIntoView는 문서(window) 스크롤까지 끌어당겨
+  // 진행자가 다른 버튼을 누르려는 순간 화면이 튀므로, contents 래퍼 div를 querySelector로
+  // 파고들어 내부 ScrollArea viewport의 scrollTop만 직접 조작한다(window 스크롤 미관여).
+  const chatLogWrapperRef = useRef<HTMLDivElement>(null);
+  const chatLogFirstRunRef = useRef(true);
+  const chatLogPrevCountRef = useRef(0);
+  // 델타의 귓속말 수신자 닉네임 해석용 — 구독 이펙트를 players 변경마다 재구성하지 않도록
+  // 최신 players를 ref로 참조한다(관리 토픽 페이로드는 recipientId만 담고 닉네임은 없다).
+  const playersRef = useRef<GamePlayer[]>([]);
 
   // 투표 미마감 밤 전환 경고(Task 020) — 이번 낮에 투표 마감(단독/동률 확정) 처리가 됐는지
   // 추적하는 클라 전용 가드. 새 낮이 시작되면(아래 tally 리셋 effect) false로 되돌린다.
@@ -178,6 +224,8 @@ export default function GameAdminPage() {
       // 리셋 후 재시작 시 role이 다시 배분되므로, 이전 판의 rolesById를 비워 아래 역할
       // 조회 effect가 "아직 못 가져온 상태"로 인식해 새로 채우도록 한다(코드 리뷰 반영).
       setRolesById({});
+      // 리셋은 game_messages를 삭제하므로(resetRoomToWaiting) 전체 대화 로그도 비운다.
+      setChatLog([]);
     },
   });
 
@@ -338,6 +386,106 @@ export default function GameAdminPage() {
   useEffect(() => {
     void loadNightStatus();
   }, [loadNightStatus, recoveryKey]);
+
+  // 델타 수신자 닉네임 해석용으로 최신 players를 ref에 동기화한다(구독 재구성 없이 참조).
+  useEffect(() => {
+    playersRef.current = players;
+  }, [players]);
+
+  // 전체 대화 로그 초기 스냅샷(Task 022) — PIN 게이트로 모든 채널 메시지를 불러온다.
+  // 이후 델타는 아래 관리 토픽 구독으로 병합되며, 재접속(recoveryKey) 시 재조회로 복원한다.
+  useEffect(() => {
+    if (!adminCtx) return;
+    let cancelled = false;
+    getAdminChatLog(adminCtx.roomId, adminCtx.pin).then((result) => {
+      if (cancelled || !result.ok) return;
+      setChatLog((prev) =>
+        mergeLogById(
+          prev,
+          result.messages.map((m) => ({
+            id: m.id,
+            channel: m.channel,
+            senderNickname: m.senderNickname,
+            recipientNickname: m.recipientNickname,
+            text: m.text,
+            createdAt: m.createdAt,
+          })),
+        ),
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [adminCtx, recoveryKey]);
+
+  // 전체 대화 로그 실시간 델타(Task 022) — 진행자 전용 관리 토픽을 PIN 게이트로 받아 구독한다.
+  // fanOutToAdmin이 모든 채널 메시지를 이 토픽으로 1부씩 송출한다(공개/이단/당회/귓속말/시스템).
+  useEffect(() => {
+    if (!adminCtx) return;
+    let cancelled = false;
+    let cleanup: (() => void) | undefined;
+
+    getAdminInboxTopic(adminCtx.roomId, adminCtx.pin).then((result) => {
+      if (cancelled || !result.ok) return;
+
+      const supabase = createClient();
+      const channel = supabase
+        .channel(result.topic)
+        .on("broadcast", { event: GAME_EVENTS.CHAT_MESSAGE }, ({ payload }) => {
+          const msg = payload as ChatMessagePayload;
+          const recipientNickname =
+            msg.channel === "dm" && msg.recipientId
+              ? (playersRef.current.find((p) => p.id === msg.recipientId)?.nickname ?? "알 수 없음")
+              : null;
+          setChatLog((prev) =>
+            mergeLogById(prev, [
+              {
+                id: msg.id,
+                channel: msg.channel,
+                senderNickname: msg.senderNickname,
+                recipientNickname,
+                text: msg.text,
+                createdAt: msg.createdAt,
+              },
+            ]),
+          );
+        })
+        .subscribe();
+
+      cleanup = () => {
+        supabase.removeChannel(channel);
+      };
+    });
+
+    return () => {
+      cancelled = true;
+      cleanup?.();
+    };
+  }, [adminCtx, recoveryKey]);
+
+  // 새 메시지가 "추가"되었고 사용자가 하단 근처를 보고 있을 때만 내부 viewport를 하단으로
+  // 내린다(첫 실행은 무조건 하단). window 스크롤에는 관여하지 않는다(ChatPanel.tsx와 동일 패턴).
+  useEffect(() => {
+    const viewport = chatLogWrapperRef.current?.querySelector<HTMLDivElement>(
+      "[data-radix-scroll-area-viewport]",
+    );
+
+    if (chatLogFirstRunRef.current) {
+      chatLogFirstRunRef.current = false;
+      chatLogPrevCountRef.current = chatLog.length;
+      if (viewport) viewport.scrollTop = viewport.scrollHeight;
+      return;
+    }
+
+    const increased = chatLog.length > chatLogPrevCountRef.current;
+    chatLogPrevCountRef.current = chatLog.length;
+    if (!increased || !viewport) return;
+
+    const distanceFromBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+    if (distanceFromBottom < 80) {
+      viewport.scrollTop = viewport.scrollHeight;
+    }
+  }, [chatLog]);
 
   // 실시간 구독 — 새 참가자 입장 (대기실과 동일한 공개 채널/이벤트)
   useEffect(() => {
@@ -967,6 +1115,35 @@ export default function GameAdminPage() {
               </Button>
             </div>
             {systemMessageError && <p className="text-destructive text-sm">{systemMessageError}</p>}
+          </div>
+
+          {/* 전체 대화 로그(Task 022 · F028) — 모든 채널 메시지를 채널 태그와 함께 실시간 열람한다.
+              진행자 개인 폰 전용이라 [제어] 탭에만 두고 [스크린] 탭에는 노출하지 않는다. */}
+          <div className="flex flex-col gap-2 rounded-lg border p-4">
+            <span className="text-sm font-medium text-muted-foreground">전체 대화 로그</span>
+            {chatLog.length === 0 ? (
+              <p className="text-sm text-muted-foreground">아직 대화가 없습니다.</p>
+            ) : (
+              <div ref={chatLogWrapperRef} className="contents">
+                <ScrollArea className="h-64 rounded-md border">
+                  <div className="flex flex-col gap-1.5 p-3">
+                    {chatLog.map((entry) => (
+                      <div key={entry.id} className="text-sm leading-relaxed">
+                        <Badge variant="outline" className="mr-1.5 align-middle">
+                          {CHANNEL_TAGS[entry.channel]}
+                        </Badge>
+                        <span className="font-medium">{entry.senderNickname}</span>
+                        {entry.recipientNickname && (
+                          <span className="text-muted-foreground"> → {entry.recipientNickname}</span>
+                        )}
+                        <span className="text-muted-foreground">: </span>
+                        <span className="break-words">{entry.text}</span>
+                      </div>
+                    ))}
+                  </div>
+                </ScrollArea>
+              </div>
+            )}
           </div>
 
           {/* 게임 종료/초기화 — 강제 종료는 범위 밖(승리 조건 자동 판정), 리셋은 실제 동작 */}

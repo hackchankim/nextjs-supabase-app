@@ -4,9 +4,10 @@ import { createHash, timingSafeEqual } from "crypto";
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { broadcastToRoom, broadcastToTopic } from "@/lib/game/broadcast";
-import { computeInboxToken } from "@/lib/game/inbox";
+import { computeInboxToken, computeAdminInboxToken } from "@/lib/game/inbox";
 import {
   GAME_EVENTS,
+  adminChannel,
   inboxChannel,
   type ChatMessagePayload,
   type GameEndedPayload,
@@ -59,6 +60,13 @@ const NICKNAME_MAX_LENGTH = 20;
  * 실시간 수신되므로 과거 일부만 로드해도 기능상 문제 없음).
  */
 const MESSAGE_HISTORY_LIMIT = 200;
+
+/**
+ * 진행자 전체 대화 로그(getAdminChatLog)의 최대 조회 건수 — 5개 채널을 합친 이력이라 단일
+ * 채널 스냅샷(MESSAGE_HISTORY_LIMIT)보다 넉넉히 잡되, getMessages와 동일하게 상한을 둬 방을
+ * 오래 재사용해도 조회/렌더 비용이 무한히 늘지 않게 한다(진행자는 판정 맥락상 더 많이 봐야 함).
+ */
+const ADMIN_CHAT_LOG_LIMIT = 500;
 
 /** 진행자 PIN 자릿수 */
 const ADMIN_PIN_LENGTH = 4;
@@ -683,10 +691,25 @@ export async function getMyInboxTopic(token: string): Promise<string | null> {
 }
 
 /**
+ * 진행자 전용 관리 토픽에 메시지 1부를 추가로 송출한다(Task 022) — 채널과 무관하게 모든
+ * 메시지(공개/이단/당회/귓속말/시스템)를 진행자가 [제어] 탭 전체 대화 로그에서 실시간으로
+ * 볼 수 있게 한다. 참가자 배달 경로(공개 room 채널·개인 인박스)와 완전히 분리된 별도 토픽이라
+ * 참가자에게는 어떤 형태로도 노출되지 않는다. 부가 기능이므로 실패해도 throw하지 않는다.
+ */
+async function fanOutToAdmin(roomId: string, payload: ChatMessagePayload): Promise<void> {
+  await broadcastToTopic(
+    adminChannel(roomId, computeAdminInboxToken(roomId)),
+    GAME_EVENTS.CHAT_MESSAGE,
+    payload,
+  );
+}
+
+/**
  * 채팅 메시지를 수신 자격이 있는 참가자에게만 fan-out한다.
  * - public/system: 공개 room 채널 1회
  * - heretic/council: 같은 방의 해당 역할군 전원의 개인 인박스
  * - dm: 발신자·수신자 두 사람의 개인 인박스
+ * 모든 채널의 메시지는 진행자 관리 토픽으로도 1부 추가 송출한다(Task 022 · 전체 대화 로그).
  * 실패해도 throw하지 않는다(broadcastToRoom/broadcastToTopic이 이미 부가 기능으로 처리).
  */
 async function fanOutMessage(
@@ -697,6 +720,9 @@ async function fanOutMessage(
   senderId: string,
   recipientId: string | undefined,
 ): Promise<void> {
+  // 진행자 전체 대화 로그용 사본 — 채널 분기 이전에 무조건 1부 보낸다.
+  await fanOutToAdmin(roomId, payload);
+
   if (channel === "public" || channel === "system") {
     await broadcastToRoom(roomId, GAME_EVENTS.CHAT_MESSAGE, payload);
     return;
@@ -1019,7 +1045,7 @@ async function resolveElimination(
     .eq("id", targetId)
     .eq("room_id", roomId)
     .eq("is_alive", true)
-    .select("id, nickname")
+    .select("id, nickname, role")
     .maybeSingle();
 
   if (targetError) {
@@ -1065,11 +1091,96 @@ async function resolveElimination(
       createdAt: message.created_at,
     };
     await broadcastToRoom(roomId, GAME_EVENTS.CHAT_MESSAGE, payload);
+    await fanOutToAdmin(roomId, payload);
   }
 
   await broadcastToRoom(roomId, GAME_EVENTS.PLAYER_ELIMINATED, { playerId: targetId });
 
+  // 이단 대장 역할 승계(Task 022 · F027) — 밤 처리 권한 이관을 사망 반영 직후 곧바로 확정한다.
+  // (승격은 생존 이단 팀 인원수를 바꾸지 않아 evaluateWinner 전/후 어디에 둬도 승패 판정은
+  //  동일하지만, 권한 이관이므로 사망 처리에 최대한 붙여 둔다.)
+  await promoteHereticLeaderIfNeeded(
+    supabase,
+    roomId,
+    target.role as PlayerRole | null,
+  );
+
   return evaluateWinner(supabase, roomId);
+}
+
+/**
+ * 이단 대장 역할 승계(Task 022 · F027) — 방금 탈락한 플레이어가 이단 대장(heretic_leader)이고
+ * 같은 방에 살아있는 이단(role='heretic')이 1명 이상 남아 있으면, 그중 랜덤 1명을 새 이단
+ * 대장으로 승격(role UPDATE)한다. 남은 이단이 없으면(전멸) 승계하지 않는다.
+ *
+ * 밤 처리 권한은 "살아있는 플레이어의 현재 role"(NIGHT_ACTION_ROLES + ROLE_TO_ACTION_TYPE)에서
+ * 파생되므로 role UPDATE만으로 능력이 이관된다. 승계 사실은 공개 채널에 절대 노출하지 않고
+ * (무차별 UI 유지), 승격자 본인의 개인 인박스에만 시스템성 알림을 Broadcast한다.
+ * export하지 않는다 — resolveElimination(모든 사망 경로가 지나는 choke point) 내부 전용.
+ */
+async function promoteHereticLeaderIfNeeded(
+  supabase: AdminClient,
+  roomId: string,
+  deceasedRole: PlayerRole | null,
+): Promise<void> {
+  if (deceasedRole !== "heretic_leader") return;
+
+  const { data: aliveHeretics, error } = await supabase
+    .from("game_players")
+    .select("id")
+    .eq("room_id", roomId)
+    .eq("role", "heretic")
+    .eq("is_alive", true);
+
+  if (error || !aliveHeretics || aliveHeretics.length === 0) {
+    // 남은 이단이 없으면(전멸) 승계 없음 — 밤 처리 능력이 완전히 소멸하고 게임은 계속된다.
+    return;
+  }
+
+  // 후보를 무작위 순서로 시도하되, 승격 UPDATE에 is_alive=true 가드를 건다 — 조회~승격 사이에
+  // 다른 경로(거의 동시의 강퇴/수동 탈락)로 먼저 탈락한 후보를 잘못 승격시키지 않기 위함
+  // (resolveElimination의 사망 UPDATE와 동일한 방어). 실제로 1행이 갱신된 첫 후보에서 멈춘다.
+  const candidates = fisherYatesShuffle(aliveHeretics);
+  let successorId: string | null = null;
+  for (const candidate of candidates) {
+    const { data: promoted, error: promoteError } = await supabase
+      .from("game_players")
+      .update({ role: "heretic_leader" })
+      .eq("id", candidate.id)
+      .eq("is_alive", true)
+      .select("id")
+      .maybeSingle();
+
+    if (promoteError) {
+      console.error("[promoteHereticLeaderIfNeeded] 이단 대장 승계 실패", promoteError);
+      return;
+    }
+    if (promoted) {
+      successorId = promoted.id;
+      break;
+    }
+  }
+
+  // 모든 후보가 조회 이후 경합에서 먼저 탈락한 경우 — 승격 없이 종료한다(밤 처리 능력 소멸).
+  if (!successorId) return;
+
+  // 승격자 개인 인박스로만 알린다 — DB에 남기지 않는 휘발성 알림이라 다른 참가자·공개 채널·
+  // 진행자 로그 어디에도 새어나가지 않는다(무차별 UI 유지). 승격자 클라이언트는 다음 페이즈
+  // 전환 시 getResumeState 재조회로 role을 갱신해 밤 행동 패널이 활성화된다.
+  const notice: ChatMessagePayload = {
+    id: crypto.randomUUID(),
+    channel: "system",
+    senderId: null,
+    senderNickname: "시스템",
+    text: "이단 대장이 탈락하여 당신이 밤 처리 역할을 이어받았습니다",
+    recipientId: null,
+    createdAt: new Date().toISOString(),
+  };
+  await broadcastToTopic(
+    inboxChannel(roomId, computeInboxToken(successorId)),
+    GAME_EVENTS.CHAT_MESSAGE,
+    notice,
+  );
 }
 
 /**
@@ -1781,6 +1892,7 @@ export async function resolveNight(roomId: string, pin: string): Promise<Resolve
         createdAt: message.created_at,
       };
       await broadcastToRoom(roomId, GAME_EVENTS.CHAT_MESSAGE, payload);
+      await fanOutToAdmin(roomId, payload);
     }
 
     return { ok: true, eliminatedId: null, winner: null };
@@ -2015,6 +2127,7 @@ export async function commitPhaseTransition(roomId: string): Promise<CommitPhase
         createdAt: message.created_at,
       };
       await broadcastToRoom(roomId, GAME_EVENTS.CHAT_MESSAGE, chatPayload);
+      await fanOutToAdmin(roomId, chatPayload);
     }
 
     const phasePayload: PhaseChangedPayload = { status: nextStatus, phaseNumber: nextPhaseNumber };
@@ -2376,6 +2489,7 @@ export async function sendSystemMessage(
       createdAt: message.created_at,
     };
     await broadcastToRoom(roomId, GAME_EVENTS.CHAT_MESSAGE, payload);
+    await fanOutToAdmin(roomId, payload);
 
     return { ok: true };
   } catch (error) {
@@ -2438,6 +2552,121 @@ export async function getAdminRoster(roomId: string, pin: string): Promise<GetAd
       error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
     };
   }
+}
+
+export interface AdminChatLogMessage {
+  id: string;
+  channel: ChatChannel;
+  senderId: string | null;
+  /** 발신자 닉네임 (null 발신자 = "시스템") */
+  senderNickname: string;
+  recipientId: string | null;
+  /** 귓속말 수신자 닉네임 (channel='dm'일 때만, 그 외 null) */
+  recipientNickname: string | null;
+  text: string;
+  createdAt: string;
+}
+
+type GetAdminChatLogResult =
+  | { ok: true; messages: AdminChatLogMessage[] }
+  | { ok: false; error: string };
+
+/**
+ * 진행자가 방의 전체 대화 로그를 조회한다(Task 022 · F028 · PIN 게이트) — 모든 채널
+ * (public/heretic/council/dm/system) 메시지를 created_at 오름차순으로, 발신자·수신자 닉네임과
+ * 채널을 붙여 반환한다. getAdminRoster·sendSystemMessage와 동일한 verifyAdminPin 패턴이며,
+ * 진행자 [제어] 탭 전용이다([스크린] 탭·참가자 화면에는 절대 노출하지 않는다).
+ * 초기 로드용 스냅샷이며, 이후 델타는 진행자 관리 토픽(fanOutToAdmin) 구독으로 병합된다.
+ */
+export async function getAdminChatLog(
+  roomId: string,
+  pin: string,
+): Promise<GetAdminChatLogResult> {
+  const verifyResult = await verifyAdminPin(pin, roomId);
+  if (!verifyResult.ok) {
+    return verifyResult;
+  }
+  if (verifyResult.roomId !== roomId) {
+    return { ok: false, error: "PIN이 올바르지 않습니다" };
+  }
+
+  try {
+    const supabase = createAdminClient();
+
+    // 최신 N건만 조회한다(내림차순 + limit) — 이후 오래→최신 순으로 되돌려 렌더 순서를 유지한다.
+    // getMessages의 스냅샷 상한 처리와 동일한 패턴이다.
+    const { data: recentRows, error } = await supabase
+      .from("game_messages")
+      .select("id, channel, content, created_at, player_id, recipient_id")
+      .eq("room_id", roomId)
+      .order("created_at", { ascending: false })
+      .limit(ADMIN_CHAT_LOG_LIMIT);
+
+    if (error) {
+      return { ok: false, error: `대화 로그 조회 실패: ${error.message}` };
+    }
+
+    const rows = (recentRows ?? []).slice().reverse();
+
+    // 발신자·수신자 닉네임 매핑 — 두 축의 id를 한 번에 모아 단일 조회로 해결한다.
+    const playerIds = new Set<string>();
+    (rows ?? []).forEach((row) => {
+      if (row.player_id) playerIds.add(row.player_id);
+      if (row.recipient_id) playerIds.add(row.recipient_id);
+    });
+
+    const nicknameById = new Map<string, string>();
+    if (playerIds.size > 0) {
+      const { data: players } = await supabase
+        .from("game_players")
+        .select("id, nickname")
+        .in("id", Array.from(playerIds));
+      (players ?? []).forEach((p) => nicknameById.set(p.id, p.nickname));
+    }
+
+    return {
+      ok: true,
+      messages: (rows ?? []).map((row) => ({
+        id: row.id,
+        channel: row.channel as ChatChannel,
+        senderId: row.player_id,
+        senderNickname: row.player_id ? (nicknameById.get(row.player_id) ?? "알 수 없음") : "시스템",
+        recipientId: row.recipient_id,
+        recipientNickname: row.recipient_id
+          ? (nicknameById.get(row.recipient_id) ?? "알 수 없음")
+          : null,
+        text: row.content,
+        createdAt: row.created_at,
+      })),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
+  }
+}
+
+type GetAdminInboxTopicResult = { ok: true; topic: string } | { ok: false; error: string };
+
+/**
+ * 진행자가 전체 대화 로그 실시간 구독용 관리 토픽명을 조회한다(Task 022 · PIN 게이트).
+ * 토픽명(computeAdminInboxToken 기반 HMAC)은 시크릿 없이는 역산이 불가능하므로, PIN을 통과한
+ * 진행자만 이 토픽명을 받아 구독할 수 있다 — 토큰 없이는 비밀/귓속말 메시지 사본을 구독할 수 없다.
+ */
+export async function getAdminInboxTopic(
+  roomId: string,
+  pin: string,
+): Promise<GetAdminInboxTopicResult> {
+  const verifyResult = await verifyAdminPin(pin, roomId);
+  if (!verifyResult.ok) {
+    return verifyResult;
+  }
+  if (verifyResult.roomId !== roomId) {
+    return { ok: false, error: "PIN이 올바르지 않습니다" };
+  }
+
+  return { ok: true, topic: adminChannel(roomId, computeAdminInboxToken(roomId)) };
 }
 
 export interface TeammatePlayer {

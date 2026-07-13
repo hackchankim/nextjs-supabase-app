@@ -25,6 +25,15 @@ export const presenceChannel = (roomId: string) => `presence:${roomId}`;
 export const inboxChannel = (roomId: string, inboxToken: string) =>
   `room:${roomId}:inbox:${inboxToken}`;
 
+/**
+ * 방별 진행자 전용 관리 Broadcast 채널명(Task 022) — 모든 채널의 메시지 사본이 이 토픽으로
+ * 1부씩 추가 송출되어, 진행자가 [제어] 탭에서 전체 대화 로그를 실시간으로 열람한다.
+ * token은 서버(lib/game/inbox.ts의 computeAdminInboxToken)가 계산한 HMAC 값으로, 시크릿 없이는
+ * 역산이 불가능하므로 채널명이 노출되어도 참가자가 추측해 구독할 수 없다(PIN 게이트로만 토픽명 획득).
+ */
+export const adminChannel = (roomId: string, token: string) =>
+  `room:${roomId}:admin:${token}`;
+
 /** Broadcast 이벤트 이름 */
 export const GAME_EVENTS = {
   /** 새 참가자가 입장했을 때 */
