@@ -25,6 +25,15 @@ export const presenceChannel = (roomId: string) => `presence:${roomId}`;
 export const inboxChannel = (roomId: string, inboxToken: string) =>
   `room:${roomId}:inbox:${inboxToken}`;
 
+/**
+ * 방별 진행자 전용 관리 Broadcast 채널명(Task 022) — 모든 채널의 메시지 사본이 이 토픽으로
+ * 1부씩 추가 송출되어, 진행자가 [제어] 탭에서 전체 대화 로그를 실시간으로 열람한다.
+ * token은 서버(lib/game/inbox.ts의 computeAdminInboxToken)가 계산한 HMAC 값으로, 시크릿 없이는
+ * 역산이 불가능하므로 채널명이 노출되어도 참가자가 추측해 구독할 수 없다(PIN 게이트로만 토픽명 획득).
+ */
+export const adminChannel = (roomId: string, token: string) =>
+  `room:${roomId}:admin:${token}`;
+
 /** Broadcast 이벤트 이름 */
 export const GAME_EVENTS = {
   /** 새 참가자가 입장했을 때 */
@@ -89,12 +98,15 @@ export interface ChatMessagePayload {
 }
 
 /**
- * VOTE_UPDATE 이벤트 페이로드 — 대상별 득표 집계와 참여 현황만 담는다.
- * 개별 투표자→대상 매핑(누가 누구에게 투표했는지)은 절대 포함하지 않는다(투표 비밀 보장).
+ * VOTE_UPDATE 이벤트 페이로드 — 대상별 득표 집계와 참여 현황을 담는다.
+ * 낮 투표는 공개 — 대상별 투표자 id 목록을 함께 Broadcast한다. 닉네임이 아닌 id만 실어
+ * 경량화하며, 클라이언트가 보유한 players 목록으로 id→닉네임을 매핑한다.
  */
 export interface VoteUpdatePayload {
   /** 대상 참가자 id → 득표 수 */
   tally: Record<string, number>;
+  /** 대상 참가자 id → 투표자 id 배열 */
+  voters: Record<string, string[]>;
   /** 이번 페이즈에 투표를 마친 고유 투표자 수 */
   voterCount: number;
   /** 현재 생존자 수 */

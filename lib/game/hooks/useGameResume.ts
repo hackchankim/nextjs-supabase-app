@@ -23,10 +23,14 @@ interface UseGameResumeResult {
  * @param sessionToken localStorage에 저장된 본인 세션 토큰(없으면 no-op)
  * @param recoveryKey (선택) 네트워크 복구 신호(useNetworkRecovery). 값이 바뀌면 스냅샷을
  *   다시 조회한다 — 오프라인/백그라운드 중 놓친 본인 생존 여부 변경을 복원하기 위함.
+ * @param phaseKey (선택) 페이즈 변화 신호(예: `${status}:${phaseNumber}`). 값이 바뀌면
+ *   스냅샷을 다시 조회한다 — 이단 대장 역할 승계(Task 022 · F027)로 본인 role이 바뀐 경우,
+ *   다음 페이즈 진입 시 role을 갱신해 밤 행동 패널이 활성화되도록 하기 위함.
  */
 export function useGameResume(
   sessionToken: string | null,
   recoveryKey?: number,
+  phaseKey?: string | number,
 ): UseGameResumeResult {
   const [resume, setResume] = useState<ResumeState | null>(null);
   const [loading, setLoading] = useState(true);
@@ -52,7 +56,7 @@ export function useGameResume(
     return () => {
       cancelled = true;
     };
-  }, [sessionToken, recoveryKey]);
+  }, [sessionToken, recoveryKey, phaseKey]);
 
   return { resume, loading };
 }

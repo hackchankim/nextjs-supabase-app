@@ -4,9 +4,10 @@ import { createHash, timingSafeEqual } from "crypto";
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { broadcastToRoom, broadcastToTopic } from "@/lib/game/broadcast";
-import { computeInboxToken } from "@/lib/game/inbox";
+import { computeInboxToken, computeAdminInboxToken } from "@/lib/game/inbox";
 import {
   GAME_EVENTS,
+  adminChannel,
   inboxChannel,
   type ChatMessagePayload,
   type GameEndedPayload,
@@ -46,8 +47,6 @@ const MESSAGE_MAX_LENGTH = 500;
  */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** 낮에만 활성화되는 채널 (밤에는 비활성) */
-const DAY_ONLY_CHANNELS: readonly ChatChannel[] = ["public", "dm"];
 /** 밤에만 활성화되는 비밀 채널 (낮에는 비활성) */
 const NIGHT_ONLY_CHANNELS: readonly ChatChannel[] = ["heretic", "council"];
 
@@ -61,6 +60,13 @@ const NICKNAME_MAX_LENGTH = 20;
  * 실시간 수신되므로 과거 일부만 로드해도 기능상 문제 없음).
  */
 const MESSAGE_HISTORY_LIMIT = 200;
+
+/**
+ * 진행자 전체 대화 로그(getAdminChatLog)의 최대 조회 건수 — 5개 채널을 합친 이력이라 단일
+ * 채널 스냅샷(MESSAGE_HISTORY_LIMIT)보다 넉넉히 잡되, getMessages와 동일하게 상한을 둬 방을
+ * 오래 재사용해도 조회/렌더 비용이 무한히 늘지 않게 한다(진행자는 판정 맥락상 더 많이 봐야 함).
+ */
+const ADMIN_CHAT_LOG_LIMIT = 500;
 
 /** 진행자 PIN 자릿수 */
 const ADMIN_PIN_LENGTH = 4;
@@ -685,10 +691,25 @@ export async function getMyInboxTopic(token: string): Promise<string | null> {
 }
 
 /**
+ * 진행자 전용 관리 토픽에 메시지 1부를 추가로 송출한다(Task 022) — 채널과 무관하게 모든
+ * 메시지(공개/이단/당회/귓속말/시스템)를 진행자가 [제어] 탭 전체 대화 로그에서 실시간으로
+ * 볼 수 있게 한다. 참가자 배달 경로(공개 room 채널·개인 인박스)와 완전히 분리된 별도 토픽이라
+ * 참가자에게는 어떤 형태로도 노출되지 않는다. 부가 기능이므로 실패해도 throw하지 않는다.
+ */
+async function fanOutToAdmin(roomId: string, payload: ChatMessagePayload): Promise<void> {
+  await broadcastToTopic(
+    adminChannel(roomId, computeAdminInboxToken(roomId)),
+    GAME_EVENTS.CHAT_MESSAGE,
+    payload,
+  );
+}
+
+/**
  * 채팅 메시지를 수신 자격이 있는 참가자에게만 fan-out한다.
  * - public/system: 공개 room 채널 1회
  * - heretic/council: 같은 방의 해당 역할군 전원의 개인 인박스
  * - dm: 발신자·수신자 두 사람의 개인 인박스
+ * 모든 채널의 메시지는 진행자 관리 토픽으로도 1부 추가 송출한다(Task 022 · 전체 대화 로그).
  * 실패해도 throw하지 않는다(broadcastToRoom/broadcastToTopic이 이미 부가 기능으로 처리).
  */
 async function fanOutMessage(
@@ -699,6 +720,9 @@ async function fanOutMessage(
   senderId: string,
   recipientId: string | undefined,
 ): Promise<void> {
+  // 진행자 전체 대화 로그용 사본 — 채널 분기 이전에 무조건 1부 보낸다.
+  await fanOutToAdmin(roomId, payload);
+
   if (channel === "public" || channel === "system") {
     await broadcastToRoom(roomId, GAME_EVENTS.CHAT_MESSAGE, payload);
     return;
@@ -779,9 +803,10 @@ export async function sendMessage(
       return { ok: false, error: "게임 방을 찾을 수 없습니다" };
     }
 
-    // 페이즈 게이팅 — 서버가 최종 권위. public/dm은 낮에만, heretic/council은 밤에만 활성.
-    if (DAY_ONLY_CHANNELS.includes(channel) && room.status !== "day") {
-      return { ok: false, error: "낮에만 보낼 수 있는 채널입니다" };
+    // 페이즈 게이팅 — 서버가 최종 권위. public/dm은 낮·밤 모두 활성, heretic/council은 밤에만 활성.
+    const isPlayPhase = room.status === "day" || room.status === "night";
+    if ((channel === "public" || channel === "dm") && !isPlayPhase) {
+      return { ok: false, error: "게임 진행 중에만 보낼 수 있는 채널입니다" };
     }
     if (NIGHT_ONLY_CHANNELS.includes(channel) && room.status !== "night") {
       return { ok: false, error: "밤에만 보낼 수 있는 채널입니다" };
@@ -949,6 +974,8 @@ export async function getMessages(
 interface VoteTally {
   /** 대상 참가자 id → 득표 수 */
   tally: Record<string, number>;
+  /** 대상 참가자 id → 투표자 id 배열 (낮 투표는 공개이므로 대상별 투표자 명단도 함께 집계) */
+  voters: Record<string, string[]>;
   /** 이번 페이즈에 투표를 마친 고유 투표자 수 */
   voterCount: number;
   /** 현재 생존자 수 */
@@ -956,8 +983,9 @@ interface VoteTally {
 }
 
 /**
- * 현재 phase의 투표를 집계한다 (대상별 득표 수 + 고유 투표자 수 + 생존자 수).
- * 개별 투표자→대상 매핑은 이 함수 밖으로 반환하지 않는다 — 호출부는 집계 결과만 사용해야 한다.
+ * 현재 phase의 투표를 집계한다 (대상별 득표 수 + 대상별 투표자 id 목록 + 고유 투표자 수 +
+ * 생존자 수). 낮 투표는 공개이므로 voters(대상별 투표자 id 배열)도 함께 반환한다 — 닉네임이
+ * 아닌 id만 담아 경량화하며, 클라이언트가 보유한 players 목록으로 id→닉네임을 매핑한다.
  */
 async function computeTally(
   supabase: AdminClient,
@@ -975,9 +1003,11 @@ async function computeTally(
   }
 
   const tally: Record<string, number> = {};
+  const voters: Record<string, string[]> = {};
   const voterIds = new Set<string>();
   (votes ?? []).forEach((vote) => {
     tally[vote.target_id] = (tally[vote.target_id] ?? 0) + 1;
+    (voters[vote.target_id] ??= []).push(vote.voter_id);
     voterIds.add(vote.voter_id);
   });
 
@@ -991,7 +1021,7 @@ async function computeTally(
     throw new Error(`생존자 집계 실패: ${aliveError.message}`);
   }
 
-  return { tally, voterCount: voterIds.size, aliveCount: aliveCount ?? 0 };
+  return { tally, voters, voterCount: voterIds.size, aliveCount: aliveCount ?? 0 };
 }
 
 /**
@@ -1015,7 +1045,7 @@ async function resolveElimination(
     .eq("id", targetId)
     .eq("room_id", roomId)
     .eq("is_alive", true)
-    .select("id, nickname")
+    .select("id, nickname, role")
     .maybeSingle();
 
   if (targetError) {
@@ -1061,11 +1091,96 @@ async function resolveElimination(
       createdAt: message.created_at,
     };
     await broadcastToRoom(roomId, GAME_EVENTS.CHAT_MESSAGE, payload);
+    await fanOutToAdmin(roomId, payload);
   }
 
   await broadcastToRoom(roomId, GAME_EVENTS.PLAYER_ELIMINATED, { playerId: targetId });
 
+  // 이단 대장 역할 승계(Task 022 · F027) — 밤 처리 권한 이관을 사망 반영 직후 곧바로 확정한다.
+  // (승격은 생존 이단 팀 인원수를 바꾸지 않아 evaluateWinner 전/후 어디에 둬도 승패 판정은
+  //  동일하지만, 권한 이관이므로 사망 처리에 최대한 붙여 둔다.)
+  await promoteHereticLeaderIfNeeded(
+    supabase,
+    roomId,
+    target.role as PlayerRole | null,
+  );
+
   return evaluateWinner(supabase, roomId);
+}
+
+/**
+ * 이단 대장 역할 승계(Task 022 · F027) — 방금 탈락한 플레이어가 이단 대장(heretic_leader)이고
+ * 같은 방에 살아있는 이단(role='heretic')이 1명 이상 남아 있으면, 그중 랜덤 1명을 새 이단
+ * 대장으로 승격(role UPDATE)한다. 남은 이단이 없으면(전멸) 승계하지 않는다.
+ *
+ * 밤 처리 권한은 "살아있는 플레이어의 현재 role"(NIGHT_ACTION_ROLES + ROLE_TO_ACTION_TYPE)에서
+ * 파생되므로 role UPDATE만으로 능력이 이관된다. 승계 사실은 공개 채널에 절대 노출하지 않고
+ * (무차별 UI 유지), 승격자 본인의 개인 인박스에만 시스템성 알림을 Broadcast한다.
+ * export하지 않는다 — resolveElimination(모든 사망 경로가 지나는 choke point) 내부 전용.
+ */
+async function promoteHereticLeaderIfNeeded(
+  supabase: AdminClient,
+  roomId: string,
+  deceasedRole: PlayerRole | null,
+): Promise<void> {
+  if (deceasedRole !== "heretic_leader") return;
+
+  const { data: aliveHeretics, error } = await supabase
+    .from("game_players")
+    .select("id")
+    .eq("room_id", roomId)
+    .eq("role", "heretic")
+    .eq("is_alive", true);
+
+  if (error || !aliveHeretics || aliveHeretics.length === 0) {
+    // 남은 이단이 없으면(전멸) 승계 없음 — 밤 처리 능력이 완전히 소멸하고 게임은 계속된다.
+    return;
+  }
+
+  // 후보를 무작위 순서로 시도하되, 승격 UPDATE에 is_alive=true 가드를 건다 — 조회~승격 사이에
+  // 다른 경로(거의 동시의 강퇴/수동 탈락)로 먼저 탈락한 후보를 잘못 승격시키지 않기 위함
+  // (resolveElimination의 사망 UPDATE와 동일한 방어). 실제로 1행이 갱신된 첫 후보에서 멈춘다.
+  const candidates = fisherYatesShuffle(aliveHeretics);
+  let successorId: string | null = null;
+  for (const candidate of candidates) {
+    const { data: promoted, error: promoteError } = await supabase
+      .from("game_players")
+      .update({ role: "heretic_leader" })
+      .eq("id", candidate.id)
+      .eq("is_alive", true)
+      .select("id")
+      .maybeSingle();
+
+    if (promoteError) {
+      console.error("[promoteHereticLeaderIfNeeded] 이단 대장 승계 실패", promoteError);
+      return;
+    }
+    if (promoted) {
+      successorId = promoted.id;
+      break;
+    }
+  }
+
+  // 모든 후보가 조회 이후 경합에서 먼저 탈락한 경우 — 승격 없이 종료한다(밤 처리 능력 소멸).
+  if (!successorId) return;
+
+  // 승격자 개인 인박스로만 알린다 — DB에 남기지 않는 휘발성 알림이라 다른 참가자·공개 채널·
+  // 진행자 로그 어디에도 새어나가지 않는다(무차별 UI 유지). 승격자 클라이언트는 다음 페이즈
+  // 전환 시 getResumeState 재조회로 role을 갱신해 밤 행동 패널이 활성화된다.
+  const notice: ChatMessagePayload = {
+    id: crypto.randomUUID(),
+    channel: "system",
+    senderId: null,
+    senderNickname: "시스템",
+    text: "이단 대장이 탈락하여 당신이 밤 처리 역할을 이어받았습니다",
+    recipientId: null,
+    createdAt: new Date().toISOString(),
+  };
+  await broadcastToTopic(
+    inboxChannel(roomId, computeInboxToken(successorId)),
+    GAME_EVENTS.CHAT_MESSAGE,
+    notice,
+  );
 }
 
 /**
@@ -1123,7 +1238,7 @@ type CastVoteResult = { ok: true } | { ok: false; error: string };
 /**
  * 낮 투표를 등록/변경한다 — 1인 1표, 같은 phase 내 재투표 시 대상을 덮어쓴다(UPSERT).
  * 서버가 페이즈(day)·생존 여부·대상 유효성을 최종 검증하는 최후 방어선이다.
- * 개별 투표자→대상 매핑은 Broadcast하지 않는다 — 대상별 집계만 VOTE_UPDATE로 공개한다.
+ * 낮 투표는 공개 — 대상별 투표자 id 목록을 함께 Broadcast한다(VOTE_UPDATE의 voters 필드).
  */
 export async function castVote(token: string, targetId: string): Promise<CastVoteResult> {
   try {
@@ -1138,7 +1253,7 @@ export async function castVote(token: string, targetId: string): Promise<CastVot
       return { ok: false, error: "탈락한 참가자는 투표할 수 없습니다" };
     }
 
-    if (!UUID_RE.test(targetId) || targetId === voter.id) {
+    if (!UUID_RE.test(targetId)) {
       return { ok: false, error: "투표 대상을 확인해주세요" };
     }
 
@@ -1196,6 +1311,8 @@ export async function castVote(token: string, targetId: string): Promise<CastVot
 export interface VoteState {
   /** 대상 참가자 id → 득표 수 */
   tally: Record<string, number>;
+  /** 대상 참가자 id → 투표자 id 배열 (낮 투표 공개 — 새로고침·지각 접속 스냅샷 복원용) */
+  voters: Record<string, string[]>;
   /** 본인이 이번 페이즈에 투표한 대상 id (미투표면 null) */
   myVote: string | null;
   /** 이번 페이즈에 투표를 마친 고유 투표자 수 */
@@ -1205,8 +1322,8 @@ export interface VoteState {
 }
 
 /**
- * 세션 토큰으로 현재 phase의 투표 스냅샷을 조회한다 (집계 + 본인 투표만).
- * role/다른 참가자의 투표 대상은 절대 포함하지 않는다.
+ * 세션 토큰으로 현재 phase의 투표 스냅샷을 조회한다 (집계 + 대상별 투표자 id 목록 + 본인 투표).
+ * role은 절대 포함하지 않는다.
  */
 export async function getVoteState(token: string): Promise<VoteState | null> {
   const supabase = createAdminClient();
@@ -1226,7 +1343,7 @@ export async function getVoteState(token: string): Promise<VoteState | null> {
     return null;
   }
 
-  const { tally, voterCount, aliveCount } = await computeTally(
+  const { tally, voters, voterCount, aliveCount } = await computeTally(
     supabase,
     voter.roomId,
     room.phase_number,
@@ -1242,6 +1359,7 @@ export async function getVoteState(token: string): Promise<VoteState | null> {
 
   return {
     tally,
+    voters,
     myVote: myVoteRow?.target_id ?? null,
     voterCount,
     aliveCount,
@@ -1774,6 +1892,7 @@ export async function resolveNight(roomId: string, pin: string): Promise<Resolve
         createdAt: message.created_at,
       };
       await broadcastToRoom(roomId, GAME_EVENTS.CHAT_MESSAGE, payload);
+      await fanOutToAdmin(roomId, payload);
     }
 
     return { ok: true, eliminatedId: null, winner: null };
@@ -2008,6 +2127,7 @@ export async function commitPhaseTransition(roomId: string): Promise<CommitPhase
         createdAt: message.created_at,
       };
       await broadcastToRoom(roomId, GAME_EVENTS.CHAT_MESSAGE, chatPayload);
+      await fanOutToAdmin(roomId, chatPayload);
     }
 
     const phasePayload: PhaseChangedPayload = { status: nextStatus, phaseNumber: nextPhaseNumber };
@@ -2369,6 +2489,7 @@ export async function sendSystemMessage(
       createdAt: message.created_at,
     };
     await broadcastToRoom(roomId, GAME_EVENTS.CHAT_MESSAGE, payload);
+    await fanOutToAdmin(roomId, payload);
 
     return { ok: true };
   } catch (error) {
@@ -2431,6 +2552,121 @@ export async function getAdminRoster(roomId: string, pin: string): Promise<GetAd
       error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
     };
   }
+}
+
+export interface AdminChatLogMessage {
+  id: string;
+  channel: ChatChannel;
+  senderId: string | null;
+  /** 발신자 닉네임 (null 발신자 = "시스템") */
+  senderNickname: string;
+  recipientId: string | null;
+  /** 귓속말 수신자 닉네임 (channel='dm'일 때만, 그 외 null) */
+  recipientNickname: string | null;
+  text: string;
+  createdAt: string;
+}
+
+type GetAdminChatLogResult =
+  | { ok: true; messages: AdminChatLogMessage[] }
+  | { ok: false; error: string };
+
+/**
+ * 진행자가 방의 전체 대화 로그를 조회한다(Task 022 · F028 · PIN 게이트) — 모든 채널
+ * (public/heretic/council/dm/system) 메시지를 created_at 오름차순으로, 발신자·수신자 닉네임과
+ * 채널을 붙여 반환한다. getAdminRoster·sendSystemMessage와 동일한 verifyAdminPin 패턴이며,
+ * 진행자 [제어] 탭 전용이다([스크린] 탭·참가자 화면에는 절대 노출하지 않는다).
+ * 초기 로드용 스냅샷이며, 이후 델타는 진행자 관리 토픽(fanOutToAdmin) 구독으로 병합된다.
+ */
+export async function getAdminChatLog(
+  roomId: string,
+  pin: string,
+): Promise<GetAdminChatLogResult> {
+  const verifyResult = await verifyAdminPin(pin, roomId);
+  if (!verifyResult.ok) {
+    return verifyResult;
+  }
+  if (verifyResult.roomId !== roomId) {
+    return { ok: false, error: "PIN이 올바르지 않습니다" };
+  }
+
+  try {
+    const supabase = createAdminClient();
+
+    // 최신 N건만 조회한다(내림차순 + limit) — 이후 오래→최신 순으로 되돌려 렌더 순서를 유지한다.
+    // getMessages의 스냅샷 상한 처리와 동일한 패턴이다.
+    const { data: recentRows, error } = await supabase
+      .from("game_messages")
+      .select("id, channel, content, created_at, player_id, recipient_id")
+      .eq("room_id", roomId)
+      .order("created_at", { ascending: false })
+      .limit(ADMIN_CHAT_LOG_LIMIT);
+
+    if (error) {
+      return { ok: false, error: `대화 로그 조회 실패: ${error.message}` };
+    }
+
+    const rows = (recentRows ?? []).slice().reverse();
+
+    // 발신자·수신자 닉네임 매핑 — 두 축의 id를 한 번에 모아 단일 조회로 해결한다.
+    const playerIds = new Set<string>();
+    (rows ?? []).forEach((row) => {
+      if (row.player_id) playerIds.add(row.player_id);
+      if (row.recipient_id) playerIds.add(row.recipient_id);
+    });
+
+    const nicknameById = new Map<string, string>();
+    if (playerIds.size > 0) {
+      const { data: players } = await supabase
+        .from("game_players")
+        .select("id, nickname")
+        .in("id", Array.from(playerIds));
+      (players ?? []).forEach((p) => nicknameById.set(p.id, p.nickname));
+    }
+
+    return {
+      ok: true,
+      messages: (rows ?? []).map((row) => ({
+        id: row.id,
+        channel: row.channel as ChatChannel,
+        senderId: row.player_id,
+        senderNickname: row.player_id ? (nicknameById.get(row.player_id) ?? "알 수 없음") : "시스템",
+        recipientId: row.recipient_id,
+        recipientNickname: row.recipient_id
+          ? (nicknameById.get(row.recipient_id) ?? "알 수 없음")
+          : null,
+        text: row.content,
+        createdAt: row.created_at,
+      })),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다",
+    };
+  }
+}
+
+type GetAdminInboxTopicResult = { ok: true; topic: string } | { ok: false; error: string };
+
+/**
+ * 진행자가 전체 대화 로그 실시간 구독용 관리 토픽명을 조회한다(Task 022 · PIN 게이트).
+ * 토픽명(computeAdminInboxToken 기반 HMAC)은 시크릿 없이는 역산이 불가능하므로, PIN을 통과한
+ * 진행자만 이 토픽명을 받아 구독할 수 있다 — 토큰 없이는 비밀/귓속말 메시지 사본을 구독할 수 없다.
+ */
+export async function getAdminInboxTopic(
+  roomId: string,
+  pin: string,
+): Promise<GetAdminInboxTopicResult> {
+  const verifyResult = await verifyAdminPin(pin, roomId);
+  if (!verifyResult.ok) {
+    return verifyResult;
+  }
+  if (verifyResult.roomId !== roomId) {
+    return { ok: false, error: "PIN이 올바르지 않습니다" };
+  }
+
+  return { ok: true, topic: adminChannel(roomId, computeAdminInboxToken(roomId)) };
 }
 
 export interface TeammatePlayer {

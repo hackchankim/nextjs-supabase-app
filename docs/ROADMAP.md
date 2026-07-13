@@ -593,3 +593,71 @@
   - [x] 이단 팀·당회 소속 참가자의 비밀 채널 탭에 같은 팀 멤버 명단이 표시되고, 성도·권사님은 개인 플레이스홀더만 보이며, 다른 팀 명단은 노출되지 않는가 _(팀원 실시간 탈락 취소선 즉시 반영 확인)_
   - [x] 낮에 투표를 마감하지 않고 밤 전환 시 확인 팝업이 뜨고, 투표 마감(또는 동률 처리) 후 전환 시엔 팝업 없이 바로 전환되며, 밤→낮 전환엔 경고가 없는가
   - [x] lint/typecheck 통과, 콘솔 에러 없음, 무차별 UI 회귀 없음(비밀 채널 탭 제목·구조 전원 동일)
+
+---
+
+### Phase 5: 현장 피드백 반영 · 게임 운영 개선 2차
+
+> 진행자가 오늘 교회에서 실제로 게임을 운영하며 발견한 현장 피드백 4건(PRD F009 수정 · F007/F016 수정 · F027 신규 · F028 신규)을 반영한다. Task 020과 같은 성격(실사용 중 발견한 개선의 묶음)이며, 시스템 축(참가자 플레이 UX vs 서버 로직·진행자 도구)으로 2개 태스크로 분할한다. **공통 전제:** 모든 변경이 기존 스키마로 구현 가능해 **DB 마이그레이션·신규 npm 의존성이 전혀 필요 없다**(`game_votes`는 이미 `voter_id` 저장, `role`은 `heretic_leader`를 허용하는 text CHECK 컬럼, 모든 노출은 service_role 서버 액션이 정제한 Broadcast/PIN 게이트 조회로만 흐른다). 기존 보안 경계(anon은 `game_votes`·비밀 채널 직접 SELECT 불가) 유지. (설계 원칙: Phase 3 상단 "실시간·재접속 설계 원칙" 준수 — 스냅샷+Broadcast 델타, 비밀 컬럼 anon 미노출)
+
+- **Task 021: 낮 투표 공개화 + 밤 공개 채팅/귓속말 개방** ✅ - 완료 (auto-dev · 브랜치 auto/vote-public-night-chat · PRD: F009, F007, F016)
+  - 배경: 실사용에서 ① 비밀투표라 누가 왜 그 표를 던졌는지 토론 근거가 약했고 ② 밤에는 역할 보유자(이단/당회)만 채팅이 열려 밤에 조용한 참가자가 곧 성도로 의심받는 부작용이 있었다. 참가자 게임 플레이 화면(투표·채팅) 축의 개방성 개선을 한 태스크로 묶는다.
+  - ✅ **완료 요약**: 3개 서브항목(본인 투표 허용·실시간 공개 투표·밤 public/dm 개방) 모두 구현. DB 마이그레이션·신규 의존성 없이 기존 스키마(`game_votes.voter_id`)·기존 부품(Dialog·Broadcast)만 사용. lint/typecheck 통과, code-reviewer 정적 리뷰 무결(높음/중간 0건), qa-tester 동적 검증 **8/8 pass**(6명 참가자+진행자 실 DB 실시간 구동, 콘솔·네트워크 에러 0). 밤 행동 대상 자신 제외(`aliveOthers`)·비밀 채널 밤 전용 격리·anon 직접 SELECT 차단 경계 모두 회귀 없이 유지 확인.
+  - **① 본인 투표 허용 (F009-a)**
+    - `lib/game/actions.ts` `castVote`에서 `targetId === voter.id` 자기투표 차단 제거(UUID 형식 검사·1인 1표·중복 방지는 유지)
+    - `app/game/play/page.tsx` 투표 대상 목록을 `aliveOthers`(자신 제외) 대신 자신 포함 생존자 전원(`players.filter(p => p.isAlive)`를 `toGamePlayer` 매핑한 신규 목록, 예: `aliveVoteTargets`)으로 렌더
+    - **밤 행동 패널(`ActionPanel`)은 계속 `aliveOthers`(자신 제외) 사용** — 밤 대상 규칙은 절대 변경하지 않음
+  - **② 실시간 공개 투표 (F009-b)**
+    - `lib/game/realtime.ts` `VoteUpdatePayload`에 `voters: Record<string, string[]>`(대상 id → 투표자 **id** 배열) 추가. 닉네임이 아닌 id만 실어 페이로드 경량화(클라이언트가 보유한 `players`로 id→닉네임 매핑)
+    - `lib/game/actions.ts` `computeTally`가 `voters` 매핑도 반환하도록 확장(이미 `voter_id, target_id`를 조회 중 → 추가 쿼리 불필요). `VoteState`/`getVoteState`에도 `voters` 포함해 새로고침·지각 접속 시 스냅샷 복원
+    - `castVote`의 `VoteUpdatePayload` Broadcast가 `voters`를 함께 송출. 기존 "투표 비밀 보장"/"개별 투표자→대상 매핑은 Broadcast하지 않는다" 주석을 "낮 투표는 공개"로 갱신
+    - `lib/game/hooks/useGameVotes.ts`가 `voters`를 상태로 보관(스냅샷 + VOTE_UPDATE 델타 병합, 기존 `tally` 처리와 동일 경로)
+    - **UI 팝업** — `app/game/play/page.tsx` 투표 카드에서 각 대상 행의 이름/득표 클릭 시 shadcn `Dialog`(또는 `Popover`)로 "이 사람에게 투표한 사람" 닉네임 목록 표시. 득표 0은 "아직 없음", 자신에게 온 표도 동일 확인 가능
+    - 보안 경계 유지: 마이그레이션 0003의 anon SELECT 차단은 그대로 두고(직접 조회 계속 불가) 오직 서버가 정제한 Broadcast로만 공개
+  - **③ 밤 공개 채팅 + 1:1 귓속말 개방 (F007, F016)**
+    - `lib/game/actions.ts` `sendMessage`의 페이즈 게이팅: `public`·`dm`을 낮·밤 모두 허용(예: `const isPlayPhase = room.status === "day" || room.status === "night";` 후 `if ((channel === "public" || channel === "dm") && !isPlayPhase) return error;`). `heretic`/`council`은 `NIGHT_ONLY_CHANNELS` 그대로 밤 전용 유지. `DAY_ONLY_CHANNELS` 상수 제거 또는 의미에 맞게 정리
+    - `app/game/play/page.tsx`: 전체(public) 탭 `ChatPanel disabled`와 1:1(dm) 탭 `DirectMessageTab disabled`에서 `status === "night"` 조건 제거 → `disabled={!selfAlive}`만 유지. 비밀 채널 탭은 `status === "day"` 조건(밤 전용) 유지
+    - `getMessages`는 public/dm 열람에 페이즈 제약이 없어 별도 수정 불필요(확인만)
+  - **범위 밖(하지 않음)**: DB 스키마·마이그레이션 변경, 밤 행동 대상 규칙(자신 제외) 변경, 비밀 채널(heretic/council)의 밤 전용 게이팅 변경, 신규 npm 의존성
+
+  ### 테스트 체크리스트 (qa-tester 8/8 PASS)
+  - [x] 낮에 자기 자신에게 투표할 수 있고(자기투표 정상 집계), 밤 행동 패널 대상에는 자신이 여전히 제외되는가
+  - [x] 다른 탭에서 대상 이름/득표를 클릭하면 그 대상에게 투표한 사람들의 닉네임 목록이 팝업으로 실시간 표시되는가(재투표/변경 즉시 반영)
+  - [x] 득표 0인 대상 클릭 시 "아직 없음"이 표시되고, 자신에게 온 표도 동일하게 확인되는가
+  - [x] 새로고침·지각 접속 시 `getVoteState` 스냅샷으로 투표자 명단(voters)이 복원되는가
+  - [x] 밤 페이즈에서 성도(역할 없음) 탭이 전체 채팅·1:1 귓속말을 전송/수신할 수 있는가
+  - [x] 밤 페이즈에서도 비밀 채널(이단/당회)은 여전히 소속 멤버에게만 열리고 public/dm 개방이 채널 격리를 깨지 않는가
+  - [x] 탈락자는 낮·밤 모두 투표/채팅 입력이 비활성인가(무차별 UI·관전 모드 회귀 없음)
+  - [x] anon(브라우저)이 `game_votes`·비밀 채널을 직접 SELECT하지 못함을 재확인(보안 경계 유지)
+  - [x] lint/typecheck 통과, 콘솔·네트워크 에러 0건
+
+- **Task 022: 이단 대장 역할 승계 + 진행자 전체 대화 로그 열람** ✅ - 완료 (auto-dev · 브랜치 auto/heretic-succession-admin-log · PRD: F027, F028)
+  - 배경: 실사용에서 ① 이단 대장이 탈락하면 이단이 남아 있어도 밤 처리 능력이 완전히 소멸해 게임 밸런스가 무너졌고 ② 진행자가 대화 흐름을 전혀 볼 수 없어 운영 판단 근거가 부족했다. 서버 사망 처리 로직·진행자 도구 축을 한 태스크로 묶는다.
+  - ✅ **완료 요약**: 2개 축(이단 대장 승계·진행자 전체 대화 로그) 모두 구현. DB 마이그레이션·신규 의존성 없이 기존 스키마(`game_players.role` text CHECK)·기존 부품(개인 인박스 HMAC·Broadcast·PIN 게이트)만 사용. lint/typecheck·프로덕션 빌드 통과, code-reviewer 정적 리뷰(높음/중간 지적 전부 반영: 스크롤 점프 회귀·승격 TOCTOU·로그 무제한 조회), qa-tester 동적 검증 **9/9 pass**(6명 참가자+진행자 실 DB 다중 탭 실시간 구동, 승계·권한 이관·전멸 케이스·개인 알림 격리·전체 로그 초기 로드+델타·보안 경계·콘솔/네트워크 에러 0 실측).
+  - ⚠️ **후속 백로그**(이번 범위 밖·기능 무영향, qa-tester 관찰): ① 진행자 [제어] 탭 역할 표(`rolesById`)가 승계 직후 즉시 갱신되지 않음(밤 행동 체크리스트는 정확히 반영) — PLAYER_ELIMINATED 시 roster 재조회로 개선 가능. ② 승격자 비밀 채널 "우리 팀" 라벨(`getTeammates`)이 승계 후 즉시 갱신되지 않음(밤 행동 패널 자체는 정상 활성). 둘 다 사소한 UI 지연이며 승계 기능·보안 경계에는 영향 없음.
+  - **① 이단 대장 밤 처리 역할 승계 (F027)**
+    - 승계 로직을 `lib/game/actions.ts` `resolveElimination` 내부에 추가 — 모든 사망 경로(투표/밤/수동/강퇴)가 이 choke point를 통과하므로 한 곳만 고치면 전부 커버
+    - 사망 행 조회의 `.select("id, nickname")`에 **`role` 추가** → 죽은 플레이어가 `heretic_leader`인지 판별
+    - `heretic_leader`가 죽었고 방에 **살아있는 `heretic`가 1명 이상** 있으면 그중 **랜덤 1명**의 `role`을 `heretic_leader`로 UPDATE(승격, 공정성). 남은 이단이 없으면(전멸) 승계 없음
+    - 승계는 승리 조건 평가(`evaluateWinner`) 이전, 사망 UPDATE 직후에 배치(대장이 죽어도 이단이 남으면 게임은 계속되므로 순서 영향 없음). 밤 처리 권한은 "살아있는 플레이어의 현재 `role`"(`NIGHT_ACTION_ROLES` + `ROLE_TO_ACTION_TYPE`)에서 파생되므로 `role` UPDATE만으로 능력이 이관됨
+    - **승격자 개인 알림** — `lib/game/inbox.ts`의 개인 인박스 토픽으로 시스템성 메시지 Broadcast("이단 대장이 탈락하여 당신이 밤 처리 역할을 이어받았습니다"). 공개 채널에는 승계 사실 미노출(무차별 UI 유지)
+    - **클라이언트 role 갱신 보장** — 승격자의 `app/game/play/page.tsx`는 `role`을 `getResumeState`(`useGameResume`)에서 받는다. 밤 능력 활성(`canAct = canPerformNightAction(role, ...)`)을 위해 승격 후 role 재조회가 필요. 페이즈 전환(`PHASE_CHANGED`) 시 resume를 재조회하면 다음 밤 진입에 반영됨 — `useGameResume`(`lib/game/hooks/useGameResume.ts`)가 `PHASE_CHANGED`(또는 개인 인박스 알림 수신) 시 확실히 재조회하는지 확인하고, 아니면 그 트리거 추가
+  - **② 진행자 전체 대화 로그 열람 (F028)**
+    - **초기 로드** — `lib/game/actions.ts`에 PIN 게이트 Server Action `getAdminChatLog(roomId, pin)` 신설(`getAdminRoster`·`sendSystemMessage`와 동일한 `verifyAdminPin` 패턴). 해당 방의 **모든 채널**(public/heretic/council/dm/system) 메시지를 `created_at` 순으로 반환(발신자 닉네임·channel·recipient 닉네임 포함)
+    - **실시간 델타 — 진행자 전용 관리 토픽**: 진행자는 개인 인박스 토픽 소속이 아니므로 비밀/귓속말 실시간 수신 경로가 없다. 인박스 패턴을 재사용해 방별 토픽 신설
+      - `lib/game/inbox.ts`에 `computeAdminInboxToken(roomId)`(방별 HMAC, 시크릿 없이 역산 불가) + `lib/game/realtime.ts`에 `adminChannel(roomId, token)` 헬퍼 추가(채널명 노출돼도 추측 구독 불가)
+      - PIN 게이트 액션 `getAdminInboxTopic(roomId, pin)`으로 진행자가 토픽명 수신 후 구독
+      - `lib/game/actions.ts` `fanOutMessage`에 **모든 채널 메시지를 관리자 토픽으로도 1부 추가 Broadcast**하는 분기 추가(기존 public/heretic/council/dm fan-out 유지, 말미에 admin 토픽 전송 추가). `sendSystemMessage`·`resolveElimination`의 시스템 메시지도 관리자 토픽에 실리도록 경로 확인
+    - **UI** — `app/game/admin/page.tsx` [제어] 탭에 "전체 대화 로그" 패널 추가: 채널 태그(`[공개]`/`[이단]`/`[당회]`/`[귓속말]`/`[시스템]`) 붙인 메시지 리스트. 마운트 시 `getAdminChatLog`로 초기 로드 후 관리자 토픽 구독으로 델타 병합(기존 `roomChannel` 구독 useEffect 인근에 채널 추가 또는 별도 useEffect). 기존 `ChatBubble`/`ScrollArea` 스타일 재사용. **[스크린] 탭에는 노출하지 않음**(진행자 개인 폰 전용)
+  - **범위 밖(하지 않음)**: DB 스키마·마이그레이션 변경, `getRoomPlayers`/`getRoomState`의 role·admin_pin 미포함 원칙 변경, 페이즈 전환 서버 로직 변경, 신규 npm 의존성
+
+  ### 테스트 체크리스트 (qa-tester 9/9 PASS)
+  - [x] 이단 대장을 투표/밤/수동/강퇴 중 하나로 탈락시켰을 때(이단 잔존 상태) 남은 이단 중 1명이 새 이단 대장으로 승격되는가(SQL role 확인)
+  - [x] 승격된 이단 탭에서 다음 밤에 밤 처리(kill) 행동 패널이 활성화되고 실제 처리가 `game_night_actions`에 기록되는가
+  - [x] 이단이 전멸한 상태에서 이단 대장이 탈락하면 승계가 일어나지 않는가
+  - [x] 승격자에게만 개인 알림이 도착하고 공개 채널·다른 참가자 화면에는 승계 사실이 어떤 형태로도 노출되지 않는가(무차별 UI 유지)
+  - [x] 진행자 [제어] 탭 "전체 대화 로그"에 공개·이단·당회·귓속말·시스템 메시지가 모두 채널 태그와 함께 초기 로드되는가
+  - [x] 새 메시지(각 채널)가 진행자 관리 토픽으로 실시간 델타 병합되어 표시되는가
+  - [x] [스크린] 탭에는 대화 로그·역할이 노출되지 않는가
+  - [x] 관리자 토픽은 PIN 게이트로만 토픽명을 받고, 토큰 없이는 비밀/귓속말 메시지를 구독할 수 없는가(보안 경계)
+  - [x] lint/typecheck 통과, 콘솔·네트워크 에러 0건
